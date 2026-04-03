@@ -22,6 +22,7 @@ class User(AbstractUser):
     is_banned = models.BooleanField(default=False)
     ban_reason = models.CharField(max_length=255, blank=True, default="")
     banned_until = models.DateTimeField(null=True, blank=True)
+    telegram_id = models.BigIntegerField(unique=True, null=True, blank=True)
 
     referral_code = models.CharField(max_length=8, unique=True, blank=True, null=True)
     referred_by = models.ForeignKey(
@@ -158,3 +159,44 @@ class PasswordResetToken(models.Model):
 
     def __str__(self):
         return f"ResetToken({self.user.username})"
+
+
+class MinecraftSession(models.Model):
+    """Vaqtinchalik Minecraft kirish sessiyasi.
+
+    Launcher serverga ulanishdan oldin session yaratadi.
+    Server mod player join bo'lganda session borligini tekshiradi.
+    Session 60 soniyadan keyin o'z-o'zidan eskiradi.
+    """
+
+    SESSION_LIFETIME_SECONDS = 60
+
+    user = models.ForeignKey(
+        User, on_delete=models.CASCADE, related_name="minecraft_sessions"
+    )
+    username = models.CharField(max_length=150)
+    uuid = models.CharField(max_length=36)
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+
+    class Meta:
+        db_table = "minecraft_sessions"
+
+    def save(self, *args, **kwargs):
+        if not self.expires_at:
+            self.expires_at = timezone.now() + timedelta(
+                seconds=self.SESSION_LIFETIME_SECONDS
+            )
+        super().save(*args, **kwargs)
+
+    def is_expired(self):
+        return timezone.now() > self.expires_at
+
+    @classmethod
+    def cleanup_expired(cls):
+        """Eskirgan sessionlarni tozalash."""
+        cls.objects.filter(expires_at__lt=timezone.now()).delete()
+
+    def __str__(self):
+        return f"MinecraftSession({self.username}, expires={self.expires_at})"
+

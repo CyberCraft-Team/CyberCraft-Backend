@@ -69,17 +69,29 @@ class UserMinimalSerializer(MediaUrlMixin, serializers.ModelSerializer):
         ]
 
 
-class AdminUserSerializer(serializers.ModelSerializer):
+class AdminUserSerializer(MediaUrlMixin, serializers.ModelSerializer):
+    skin_face_url = serializers.SerializerMethodField()
+
     class Meta:
         model = User
         fields = [
             "id",
             "username",
             "email",
+            "minecraft_uuid",
+            "skin_face_url",
             "is_staff",
             "is_superuser",
             "is_whitelisted",
             "is_operator",
+            "is_banned",
+            "ban_reason",
+            "banned_until",
+            "is_email_verified",
+            "cc_balance",
+            "rank",
+            "referral_code",
+            "last_login",
             "created_at",
         ]
 

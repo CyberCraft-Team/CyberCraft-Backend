@@ -79,3 +79,20 @@ class BanCheckMiddleware:
                     )
 
         return self.get_response(request)
+
+
+class ShutdownMiddleware:
+    """Backend o'chirilayotganda yangi so'rovlarni 503 xatosi bilan qaytaradi."""
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        from apps.servers.server_manager import MinecraftServerManager
+
+        if MinecraftServerManager._is_shutting_down:
+            return JsonResponse(
+                {"error": "Server o'chirilmoqda", "code": "shutting_down"}, status=503
+            )
+
+        return self.get_response(request)

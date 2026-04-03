@@ -31,17 +31,67 @@ class TokenAuthMiddleware(BaseMiddleware):
     def get_user_from_token(self, token_key):
         from django.contrib.auth.models import AnonymousUser
         from apps.launcher.models import LauncherToken
+        from apps.accounts.models import AdminToken
 
+        # 1. Launcher tokenni tekshiramiz
         try:
             token = LauncherToken.objects.select_related("user").get(key=token_key)
-            return token.user
+            if not token.is_expired():
+                return token.user
         except LauncherToken.DoesNotExist:
-            return AnonymousUser()
+            pass
+
+        # 2. Admin tokenni tekshiramiz (web dashboard uchun)
+        try:
+            token = AdminToken.objects.select_related("user").get(key=token_key)
+            if not token.is_expired():
+                return token.user
+        except AdminToken.DoesNotExist:
+            pass
+
+        return AnonymousUser()
 
 
-application = ProtocolTypeRouter(
-    {
-        "http": django_asgi_app,
-        "websocket": TokenAuthMiddleware(URLRouter(websocket_urlpatterns)),
-    }
+class ASGIShutdownMiddleware:
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        from apps.servers.server_manager import MinecraftServerManager
+
+        if MinecraftServerManager._is_shutting_down:
+            if scope["type"] == "http":
+                await send(
+                    {
+                        "type": "http.response.start",
+                        "status": 503,
+                        "headers": [(b"content-type", b"application/json")],
+                    }
+                )
+                import json
+
+                await send(
+                    {
+                        "type": "http.response.body",
+                        "body": json.dumps(
+                            {"error": "Server o'chirilmoqda", "code": "shutting_down"}
+                        ).encode(),
+                    }
+                )
+                return
+            elif scope["type"] == "websocket":
+                # WebSocket ulanishini rad etamiz
+                await send({"type": "websocket.close", "code": 1001})
+                return
+
+        return await self.app(scope, receive, send)
+
+
+application = ASGIShutdownMiddleware(
+    ProtocolTypeRouter(
+        {
+            "http": django_asgi_app,
+            "websocket": TokenAuthMiddleware(URLRouter(websocket_urlpatterns)),
+        }
+    )
 )

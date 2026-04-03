@@ -13,6 +13,8 @@ env = environ.Env(
     EMAIL_BACKEND=(str, "django.core.mail.backends.console.EmailBackend"),
     DEFAULT_FROM_EMAIL=(str, "noreply@cybercraft.uz"),
     SITE_URL=(str, "http://localhost:3000"),
+    GOOGLE_CLIENT_ID=(str, None),
+    TELEGRAM_BOT_TOKEN=(str, None),
 )
 
 env_file = BASE_DIR / ".env"
@@ -52,6 +54,7 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
+    "config.middleware.ShutdownMiddleware",
     "corsheaders.middleware.CorsMiddleware",
     "django.middleware.security.SecurityMiddleware",
     "whitenoise.middleware.WhiteNoiseMiddleware",
@@ -177,6 +180,8 @@ CORS_ALLOW_CREDENTIALS = True
 EMAIL_BACKEND = env("EMAIL_BACKEND")
 DEFAULT_FROM_EMAIL = env("DEFAULT_FROM_EMAIL")
 SITE_URL = env("SITE_URL")
+GOOGLE_CLIENT_ID = env("GOOGLE_CLIENT_ID")
+TELEGRAM_BOT_TOKEN = env("TELEGRAM_BOT_TOKEN")
 
 LOGGING = {
     "version": 1,

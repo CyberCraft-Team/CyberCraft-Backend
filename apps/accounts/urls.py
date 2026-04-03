@@ -13,10 +13,13 @@ from .views import (
     CapeUploadView,
     minecraft_auth,
     MinecraftVerifyView,
+    MinecraftSessionCreateView,
     SendVerificationEmailView,
     VerifyEmailView,
     RequestPasswordResetView,
     ConfirmPasswordResetView,
+    GoogleLoginView,
+    TelegramLoginView,
 )
 
 urlpatterns = [
@@ -51,4 +54,11 @@ urlpatterns = [
     ),
     path("minecraft/auth/", minecraft_auth, name="minecraft-auth"),
     path("minecraft/verify/", MinecraftVerifyView.as_view(), name="minecraft-verify"),
+    path(
+        "minecraft/session/create/",
+        MinecraftSessionCreateView.as_view(),
+        name="minecraft-session-create",
+    ),
+    path("auth/google-login/", GoogleLoginView.as_view(), name="google-login"),
+    path("auth/telegram-login/", TelegramLoginView.as_view(), name="telegram-login"),
 ]

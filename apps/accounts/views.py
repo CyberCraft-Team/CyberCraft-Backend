@@ -8,11 +8,15 @@ from rest_framework.generics import ListAPIView, RetrieveUpdateDestroyAPIView
 from django.contrib.auth import authenticate
 from django.core.files.base import ContentFile
 from django.conf import settings
+from django.utils import timezone
 from PIL import Image
 import io
 import os
 import random
 import logging
+import hmac
+import hashlib
+import time
 from apps.launcher.models import LauncherToken
 from apps.launcher.authentication import LauncherTokenAuthentication
 from .models import AdminToken, User
@@ -22,6 +26,8 @@ from .serializers import (
     UserRegisterSerializer,
 )
 from .authentication import AdminTokenAuthentication
+from google.oauth2 import id_token
+from google.auth.transport import requests
 
 logger = logging.getLogger(__name__)
 
@@ -420,56 +426,24 @@ def minecraft_auth(request):
     return Response(status=200)
 
 
-class MinecraftVerifyView(APIView):
+class MinecraftSessionCreateView(APIView):
+    """Launcher serverga ulanishdan oldin session yaratadi.
 
-    permission_classes = [AllowAny]
-    authentication_classes = []
+    Launcher bu endpointni chaqiradi, keyin player serverga ulanadi.
+    Server mod player join bo'lganda MinecraftVerifyView orqali tekshiradi.
+    """
+
+    authentication_classes = [LauncherTokenAuthentication]
+    permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        uuid = request.data.get("uuid")
-        token = request.data.get("token")
+        from .models import MinecraftSession
 
-        if not token:
-            return Response(
-                {
-                    "allowed": False,
-                    "reason": "Token topilmadi. Faqat CyberCraft launcher orqali kiring.",
-                    "kick_message": "§c§lKirish rad etildi!\n\n§eSiz faqat CyberCraft launcher orqali kira olasiz.\n§7Launcher: §bcybercraft.uz/download",
-                },
-                status=status.HTTP_403_FORBIDDEN,
-            )
-
-        if not uuid:
-            return Response(
-                {
-                    "allowed": False,
-                    "reason": "UUID topilmadi.",
-                    "kick_message": "§c§lKirish rad etildi!\n\n§ePlayer UUID topilmadi.",
-                },
-                status=status.HTTP_403_FORBIDDEN,
-            )
-
-        try:
-            launcher_token = LauncherToken.objects.select_related("user").get(key=token)
-        except LauncherToken.DoesNotExist:
-            return Response(
-                {
-                    "allowed": False,
-                    "reason": "Token noto'g'ri yoki muddati tugagan.",
-                    "kick_message": "§c§lKirish rad etildi!\n\n§eToken noto'g'ri yoki muddati tugagan.\n§7Iltimos, launcherda qayta login qiling.",
-                },
-                status=status.HTTP_403_FORBIDDEN,
-            )
-
-        user = launcher_token.user
+        user = request.user
 
         if not user.is_active:
             return Response(
-                {
-                    "allowed": False,
-                    "reason": "Akkaunt faol emas.",
-                    "kick_message": "§c§lKirish rad etildi!\n\n§eAkkauntingiz bloklangan.\n§7Yordam: §bcybercraft.uz/support",
-                },
+                {"error": "Akkaunt faol emas"},
                 status=status.HTTP_403_FORBIDDEN,
             )
 
@@ -481,28 +455,116 @@ class MinecraftVerifyView(APIView):
             )
         )
 
-        uuid_clean = uuid.replace("-", "").lower()
-        expected_uuid_clean = expected_uuid.replace("-", "").lower()
+        # Eski sessionlarni tozalash
+        MinecraftSession.cleanup_expired()
 
-        if uuid_clean != expected_uuid_clean:
-            return Response(
-                {
-                    "allowed": False,
-                    "reason": "UUID mos kelmadi. Username bilan kiring.",
-                    "kick_message": "§c§lKirish rad etildi!\n\n§eUsername mos kelmadi.\n§7Launcherdagi username bilan kiring.",
-                },
-                status=status.HTTP_403_FORBIDDEN,
-            )
+        # Bu user uchun mavjud sessionlarni o'chirish
+        MinecraftSession.objects.filter(user=user).delete()
 
+        # Yangi session yaratish
+        session = MinecraftSession.objects.create(
+            user=user,
+            username=user.username,
+            uuid=expected_uuid,
+        )
+
+        # minecraft_uuid ni yangilash
         if user.minecraft_uuid != expected_uuid:
             user.minecraft_uuid = expected_uuid
             user.save(update_fields=["minecraft_uuid"])
 
         return Response(
             {
-                "allowed": True,
+                "success": True,
                 "username": user.username,
                 "uuid": expected_uuid,
+                "expires_in": MinecraftSession.SESSION_LIFETIME_SECONDS,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class MinecraftVerifyView(APIView):
+    """Server mod player join bo'lganda chaqiradi.
+
+    Session mavjudligini tekshiradi — agar launcher session yaratgan bo'lsa,
+    player kirishga ruxsat beriladi.
+    """
+
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    def post(self, request):
+        from .models import MinecraftSession
+
+        username = request.data.get("username")
+        uuid = request.data.get("uuid")
+
+        if not username:
+            return Response(
+                {
+                    "allowed": False,
+                    "reason": "Username topilmadi.",
+                    "kick_message": "§c§lKirish rad etildi!\n\n§ePlayer username topilmadi.",
+                },
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        # Eskirgan sessionlarni tozalash
+        MinecraftSession.cleanup_expired()
+
+        # Session qidirish — username bo'yicha
+        session = MinecraftSession.objects.select_related("user").filter(
+            username__iexact=username,
+            expires_at__gt=timezone.now(),
+        ).first()
+
+        if not session:
+            return Response(
+                {
+                    "allowed": False,
+                    "reason": "Session topilmadi. Faqat CyberCraft launcher orqali kiring.",
+                    "kick_message": "§c§lKirish rad etildi!\n\n§eSiz faqat CyberCraft Launcher orqali kira olasiz.\n§7Launcher yuklab olish: §bcybercraft.uz/download",
+                },
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        user = session.user
+
+        if not user.is_active:
+            session.delete()
+            return Response(
+                {
+                    "allowed": False,
+                    "reason": "Akkaunt faol emas.",
+                    "kick_message": "§c§lKirish rad etildi!\n\n§eAkkauntingiz bloklangan.\n§7Yordam: §bcybercraft.uz/support",
+                },
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        # UUID tekshirish (agar yuborilgan bo'lsa)
+        if uuid:
+            uuid_clean = uuid.replace("-", "").lower()
+            expected_clean = session.uuid.replace("-", "").lower()
+            if uuid_clean != expected_clean:
+                session.delete()
+                return Response(
+                    {
+                        "allowed": False,
+                        "reason": "UUID mos kelmadi.",
+                        "kick_message": "§c§lKirish rad etildi!\n\n§eUsername mos kelmadi.\n§7Launcherdagi username bilan kiring.",
+                    },
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
+        # Session ishlatildi — o'chirish
+        session.delete()
+
+        return Response(
+            {
+                "allowed": True,
+                "username": user.username,
+                "uuid": session.uuid,
                 "is_operator": user.is_operator,
                 "is_whitelisted": user.is_whitelisted,
             },
@@ -671,3 +733,206 @@ class ConfirmPasswordResetView(APIView):
         token.save(update_fields=["is_used"])
 
         return Response({"message": "Parol muvaffaqiyatli o'zgartirildi!"})
+
+
+class GoogleLoginView(APIView):
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    def post(self, request):
+        id_token_str = request.data.get("id_token")
+        logger.info("Google login so'rovi qabul qilindi")
+
+        if not id_token_str:
+            logger.warning("Google ID token yuborilmadi")
+            return Response(
+                {"error": "Google ID token talab qilinadi"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            # Google ID tokenni tekshirish
+            logger.info("Google tokenini tekshirish boshlandi...")
+            idinfo = id_token.verify_oauth2_token(
+                id_token_str, requests.Request(), settings.GOOGLE_CLIENT_ID,
+                clock_skew_in_seconds=10
+            )
+
+            if idinfo["iss"] not in [
+                "accounts.google.com",
+                "https://accounts.google.com",
+            ]:
+                logger.error(f"Noto'g'ri issuer: {idinfo['iss']}")
+                raise ValueError("Wrong issuer.")
+
+            email = idinfo.get("email")
+            full_name = idinfo.get("name", "")
+            logger.info(f"Token tekshirildi. Email: {email}")
+
+            if not email:
+                logger.warning("Email topilmadi")
+                return Response(
+                    {"error": "Google hisobida email topilmadi"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            # Foydalanuvchini qidirish yoki yaratish
+            user = User.objects.filter(email=email).first()
+            is_new_user = False
+
+            if not user:
+                logger.info(f"Yangi foydalanuvchi yaratish: {email}")
+                is_new_user = True
+                username = email.split("@")[0]
+
+                # Username band bo'lsa, tasodifiy raqam qo'shish
+                base_username = username
+                counter = 1
+                while User.objects.filter(username=username).exists():
+                    username = f"{base_username}{counter}"
+                    counter += 1
+
+                user = User.objects.create_user(
+                    username=username,
+                    email=email,
+                    first_name=full_name.split(" ")[0] if " " in full_name else full_name,
+                    last_name=full_name.split(" ")[1] if " " in full_name else "",
+                )
+                user.is_email_verified = True
+                user.save()
+                logger.info(f"Foydalanuvchi yaratildi: {username}")
+
+                # Tasodifiy skin tayinlash
+                from .views import assign_random_skin
+                assign_random_skin(user)
+                logger.info("Random skin tayinlandi")
+
+            if not user.is_active:
+                logger.warning(f"Foydalanuvchi faol emas: {user.username}")
+                return Response(
+                    {"error": "Akkaunt faol emas"}, status=status.HTTP_403_FORBIDDEN
+                )
+
+            # LauncherToken yaratish (vebsayt va launcher uchun)
+            LauncherToken.objects.filter(user=user).delete()
+            token = LauncherToken.objects.create(user=user)
+            logger.info(f"Token yaratildi: {user.username}")
+
+            return Response(
+                {
+                    "token": token.key,
+                    "user": UserMinimalSerializer(user, context={"request": request}).data,
+                    "is_new_user": is_new_user,
+                }
+            )
+
+        except ValueError as e:
+            logger.error(f"Google tokeni yaroqsiz: {str(e)}")
+            return Response(
+                {"error": f"Google tokeni yaroqsiz: {str(e)}"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        except Exception as e:
+            logger.exception("Google login jarayonida kutilmagan xatolik yuz berdi")
+            return Response(
+                {"error": "Tizimda xatolik yuz berdi"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+class TelegramLoginView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        auth_data = request.data
+        check_hash = auth_data.get("hash")
+
+        if not check_hash:
+            return Response(
+                {"error": "Telegram hash talab qilinadi"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Telegram ma'lumotlarini tekshirish
+        if not self.verify_telegram_auth(auth_data):
+            return Response(
+                {"error": "Telegram ma'lumotlari haqiqiy emas"},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+
+        # auth_date tekshirish (1 kun ichida bo'lishi kerak)
+        auth_date = int(auth_data.get("auth_date", 0))
+        if time.time() - auth_date > 86400:
+            return Response(
+                {"error": "Avtorizatsiya muddati tugagan"},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+
+        telegram_id = auth_data.get("id")
+        username = auth_data.get("username")
+        first_name = auth_data.get("first_name", "")
+        last_name = auth_data.get("last_name", "")
+
+        # Foydalanuvchini qidirish (email yo'q bo'lsa telegram_id orqali)
+        user = User.objects.filter(telegram_id=telegram_id).first()
+        is_new_user = False
+
+        if not user:
+            # Agar username bo'lmasa, ID dan foydalanamiz
+            if not username:
+                username = f"tg_{telegram_id}"
+            
+            # Username band bo'lsa tasodifiy raqam qo'shish
+            base_username = username
+            counter = 1
+            while User.objects.filter(username=username).exists():
+                username = f"{base_username}{counter}"
+                counter += 1
+
+            user = User.objects.create_user(
+                username=username,
+                first_name=first_name,
+                last_name=last_name,
+                telegram_id=telegram_id
+            )
+            user.is_email_verified = True # Telegram orqali kirganlar tasdiqlangan deb hisoblanadi
+            user.save()
+            is_new_user = True
+            
+            # Skin tayinlash
+            assign_random_skin(user)
+
+        # Token yaratish
+        LauncherToken.objects.filter(user=user).delete()
+        token = LauncherToken.objects.create(user=user)
+
+        return Response({
+            "token": token.key,
+            "user": UserMinimalSerializer(user, context={"request": request}).data,
+            "is_new_user": is_new_user
+        })
+
+    def verify_telegram_auth(self, auth_data):
+        # Hashni olib tashlash
+        check_data = auth_data.copy()
+        telegram_hash = check_data.pop("hash", None)
+        
+        # Alfavit tartibida saralash
+        data_check_list = []
+        for key, value in sorted(check_data.items()):
+            if value is not None:
+                data_check_list.append(f"{key}={value}")
+        
+        data_check_string = "\n".join(data_check_list)
+        
+        # Bot tokenidan foydalanib secret key yaratish
+        bot_token = settings.TELEGRAM_BOT_TOKEN
+        secret_key = hashlib.sha256(bot_token.encode()).digest()
+        
+        # Hashni hisoblash
+        calculated_hash = hmac.new(
+            secret_key, 
+            data_check_string.encode(), 
+            hashlib.sha256
+        ).hexdigest()
+        
+        return calculated_hash == telegram_hash
