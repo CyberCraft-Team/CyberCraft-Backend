@@ -7,6 +7,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 env = environ.Env(
     DEBUG=(bool, True),
     SECRET_KEY=(str,),
+    SERVERS_ROOT=(str, str(BASE_DIR / "servers")),
     ALLOWED_HOSTS=(list, ["localhost", "127.0.0.1"]),
     CORS_ORIGINS=(str, "http://localhost:3000,http://127.0.0.1:3000"),
     EMAIL_BACKEND=(str, "django.core.mail.backends.console.EmailBackend"),
@@ -128,7 +129,12 @@ STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
 MEDIA_URL = "/media/"
 MEDIA_ROOT = BASE_DIR / "media"
 
-SERVERS_ROOT = BASE_DIR / "servers"
+SERVERS_ROOT = Path(env("SERVERS_ROOT")).resolve()
+
+# ZIP orqali server yuklash (baytlarda, default 2 GB)
+SERVER_ZIP_MAX_UPLOAD_BYTES = int(
+    os.environ.get("SERVER_ZIP_MAX_UPLOAD_BYTES", str(2 * 1024 * 1024 * 1024))
+)
 
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"

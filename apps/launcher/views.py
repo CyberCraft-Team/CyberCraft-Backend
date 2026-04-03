@@ -1,7 +1,9 @@
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
-from apps.servers.models import Server, MinecraftServer
+from django.conf import settings
+import os
+from apps.servers.models import Server, MinecraftServer, ServerTypeConfig
 from .authentication import LauncherTokenAuthentication
 
 
@@ -144,6 +146,34 @@ class LauncherServerManifestView(APIView):
 
         loader = server.server_type.server_type if server.server_type else "vanilla"
         loader_version = server.loader_version
+        detected_loader, detected_loader_version = self._detect_loader_from_server_files(
+            server
+        )
+        if (not loader or loader == "vanilla") and detected_loader:
+            loader = detected_loader
+        if not loader_version and detected_loader_version:
+            loader_version = detected_loader_version
+
+        # Detected qiymatlarni DB ga saqlab qo'yamiz
+        update_fields = []
+        if loader_version and server.loader_version != loader_version:
+            server.loader_version = loader_version
+            update_fields.append("loader_version")
+        if (
+            loader
+            and loader != "vanilla"
+            and (not server.server_type or server.server_type.server_type != loader)
+        ):
+            server_type_obj = (
+                ServerTypeConfig.objects.filter(server_type=loader, is_active=True)
+                .only("server_type")
+                .first()
+            )
+            if server_type_obj:
+                server.server_type = server_type_obj
+                update_fields.append("server_type")
+        if update_fields:
+            server.save(update_fields=update_fields + ["updated_at"])
 
         manifest = {
             "id": str(server.id),
@@ -176,6 +206,47 @@ class LauncherServerManifestView(APIView):
             )
 
         return Response(manifest)
+
+    def _detect_loader_from_server_files(self, server):
+        server_path = server.server_path
+        if not server_path:
+            server_path = os.path.join(getattr(settings, "SERVERS_ROOT", ""), str(server.id))
+        if not server_path or not os.path.isdir(server_path):
+            return None, None
+
+        neoforge_root = os.path.join(server_path, "libraries", "net", "neoforged", "neoforge")
+        if os.path.isdir(neoforge_root):
+            versions = sorted(
+                [d for d in os.listdir(neoforge_root) if os.path.isdir(os.path.join(neoforge_root, d))]
+            )
+            if versions:
+                return "neoforge", versions[-1]
+
+        forge_root = os.path.join(
+            server_path, "libraries", "net", "minecraftforge", "forge"
+        )
+        if os.path.isdir(forge_root):
+            versions = sorted(
+                [d for d in os.listdir(forge_root) if os.path.isdir(os.path.join(forge_root, d))]
+            )
+            if versions:
+                # forge/1.20.1-47.2.0 -> 47.2.0 ni olamiz
+                version = versions[-1]
+                if "-" in version:
+                    version = version.split("-")[-1]
+                return "forge", version
+
+        fabric_root = os.path.join(
+            server_path, "libraries", "net", "fabricmc", "fabric-loader"
+        )
+        if os.path.isdir(fabric_root):
+            versions = sorted(
+                [d for d in os.listdir(fabric_root) if os.path.isdir(os.path.join(fabric_root, d))]
+            )
+            if versions:
+                return "fabric", versions[-1]
+
+        return None, None
 
     def _get_external_server_manifest(self, request, server):
         if server.whitelist_enabled and not getattr(
