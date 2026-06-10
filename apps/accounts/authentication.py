@@ -11,7 +11,7 @@ class AdminTokenAuthentication(TokenAuthentication):
         try:
             token = AdminToken.objects.select_related("user").get(key=key)
         except AdminToken.DoesNotExist:
-            raise AuthenticationFailed("Noto'g'ri token.")
+            return None
 
         if token.is_expired():
             token.delete()

@@ -16,7 +16,7 @@ class LauncherServersView(APIView):
 
         external_servers = Server.objects.filter(is_active=True).select_related(
             "modpack"
-        )
+        ).prefetch_related("gallery_images", "features")
         for server in external_servers:
             loader = "vanilla"
             loader_version = None
@@ -27,6 +27,24 @@ class LauncherServersView(APIView):
                 elif server.modpack.fabric_version:
                     loader = "fabric"
                     loader_version = server.modpack.fabric_version
+
+            # Gallery images
+            gallery_images = []
+            for img in server.gallery_images.all():
+                if img.image:
+                    gallery_images.append({
+                        "url": request.build_absolute_uri(img.image.url),
+                        "caption": img.caption,
+                    })
+
+            # Features
+            features = []
+            for feat in server.features.all():
+                features.append({
+                    "title": feat.title,
+                    "description": feat.description,
+                    "icon": feat.icon,
+                })
 
             all_servers.append(
                 {
@@ -40,11 +58,20 @@ class LauncherServersView(APIView):
                     "current_players": server.current_players,
                     "max_players": server.max_players,
                     "description": server.description,
+                    "category": server.category or "Survival",
+                    "last_wipe": server.last_wipe.isoformat() if server.last_wipe else None,
                     "icon_url": (
                         request.build_absolute_uri(server.icon.url)
                         if server.icon
                         else None
                     ),
+                    "background_image_url": (
+                        request.build_absolute_uri(server.background_image.url)
+                        if server.background_image
+                        else None
+                    ),
+                    "gallery_images": gallery_images,
+                    "features": features,
                     "modpack_id": server.modpack.id if server.modpack else None,
                     "modpack_name": server.modpack.name if server.modpack else None,
                     "modpack_version": (
@@ -65,7 +92,7 @@ class LauncherServersView(APIView):
 
         managed_servers = MinecraftServer.objects.all().select_related(
             "server_type", "server_jar"
-        )
+        ).prefetch_related("gallery_images")
 
         for server in managed_servers:
             server_ip = request.get_host().split(":")[0]
@@ -85,6 +112,15 @@ class LauncherServersView(APIView):
             loader = server.server_type.server_type if server.server_type else "vanilla"
             loader_version = server.loader_version
 
+            # Gallery
+            gallery_images = []
+            for img in server.gallery_images.all():
+                if img.image:
+                    gallery_images.append({
+                        "url": request.build_absolute_uri(img.image.url),
+                        "caption": img.caption,
+                    })
+
             all_servers.append(
                 {
                     "id": str(server.id),
@@ -97,7 +133,17 @@ class LauncherServersView(APIView):
                     "current_players": server.current_players,
                     "max_players": server.max_players,
                     "description": server.motd,
-                    "icon_url": None,
+                    "icon_url": (
+                        request.build_absolute_uri(server.icon.url)
+                        if server.icon
+                        else None
+                    ),
+                    "background_image_url": (
+                        request.build_absolute_uri(server.background_image.url)
+                        if server.background_image
+                        else None
+                    ),
+                    "gallery_images": gallery_images,
                     "modpack_id": None,
                     "modpack_name": None,
                     "modpack_version": None,

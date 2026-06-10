@@ -177,6 +177,11 @@ SPECTACULAR_SETTINGS = {
 CORS_ALLOWED_ORIGINS = env("CORS_ORIGINS").split(",")
 CORS_ALLOW_CREDENTIALS = True
 
+# DEBUG rejimda barcha originlardan so'rovlarni qabul qilish
+# (Minecraft MCEF va file:// protokoli uchun kerak)
+if DEBUG:
+    CORS_ALLOW_ALL_ORIGINS = True
+
 EMAIL_BACKEND = env("EMAIL_BACKEND")
 DEFAULT_FROM_EMAIL = env("DEFAULT_FROM_EMAIL")
 SITE_URL = env("SITE_URL")
@@ -199,13 +204,29 @@ LOGGING = {
         },
     },
     "loggers": {
-        "apps": {
+        "django": {
             "handlers": ["console"],
             "level": "INFO",
+            "propagate": True,
+        },
+        "django.server": {
+            "handlers": ["console"],
+            "level": "INFO",
+            "propagate": False,
+        },
+        "apps": {
+            "handlers": ["console"],
+            "level": "DEBUG",
+            "propagate": True,
         },
         "api.requests": {
             "handlers": ["console"],
             "level": "INFO",
+            "propagate": True,
         },
+    },
+    "root": {
+        "handlers": ["console"],
+        "level": "INFO",
     },
 }

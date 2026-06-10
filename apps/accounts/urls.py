@@ -9,6 +9,7 @@ from .views import (
     AdminUsersListView,
     AdminUserDetailView,
     UserRegisterView,
+    PlayerSkinView,
     SkinUploadView,
     CapeUploadView,
     minecraft_auth,
@@ -61,4 +62,6 @@ urlpatterns = [
     ),
     path("auth/google-login/", GoogleLoginView.as_view(), name="google-login"),
     path("auth/telegram-login/", TelegramLoginView.as_view(), name="telegram-login"),
+    # Public: username bo'yicha skin olish (auth kerak emas)
+    path("player/<str:username>/skin/", PlayerSkinView.as_view(), name="player-skin"),
 ]

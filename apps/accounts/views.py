@@ -85,6 +85,36 @@ def assign_random_skin(user):
     return False
 
 
+class PlayerSkinView(APIView):
+    """Username bo'yicha o'yinchining skinini qaytaradi (public, auth kerak emas).
+
+    GET /api/player/<username>/skin/ -> skin PNG fayli
+    """
+
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    def get(self, request, username):
+        from django.http import FileResponse, Http404
+
+        try:
+            user = User.objects.only("skin").get(username__iexact=username)
+        except User.DoesNotExist:
+            raise Http404("O'yinchi topilmadi")
+
+        if not user.skin:
+            raise Http404("O'yinchida skin mavjud emas")
+
+        try:
+            return FileResponse(
+                user.skin.open("rb"),
+                content_type="image/png",
+                as_attachment=False,
+            )
+        except FileNotFoundError:
+            raise Http404("Skin fayli topilmadi")
+
+
 class UserRegisterView(APIView):
     permission_classes = [AllowAny]
     authentication_classes = []
@@ -335,6 +365,8 @@ class AdminLoginView(APIView):
         username = request.data.get("username")
         password = request.data.get("password")
 
+        logger.info(f"Admin login so'rovi: username={username}")
+
         if not username or not password:
             return Response(
                 {"error": "Username va password talab qilinadi"},
@@ -344,26 +376,35 @@ class AdminLoginView(APIView):
         user = authenticate(username=username, password=password)
 
         if not user:
+            logger.warning(f"Autentifikatsiya muvaffaqiyatsiz: username={username}")
             return Response(
                 {"error": "Username yoki password noto'g'ri"},
                 status=status.HTTP_401_UNAUTHORIZED,
             )
 
         if not user.is_active:
+            logger.warning(f"Foydalanuvchi faol emas: username={username}")
             return Response(
                 {"error": "Akkaunt faol emas"}, status=status.HTTP_403_FORBIDDEN
             )
 
-        if not user.is_staff:
+        if not user.is_staff and not user.is_superuser:
+            logger.warning(f"Admin huquqi yo'q: username={username}")
             return Response(
                 {"error": "Admin paneliga kirish huquqi yo'q"},
                 status=status.HTTP_403_FORBIDDEN,
             )
 
+        logger.info(f"Admin muvaffaqiyatli kirdi: username={username}")
         AdminToken.objects.filter(user=user).delete()
         token = AdminToken.objects.create(user=user)
 
-        return Response({"token": token.key, "user": AdminUserSerializer(user).data})
+        return Response(
+            {
+                "token": token.key,
+                "user": AdminUserSerializer(user, context={"request": request}).data,
+            }
+        )
 
 
 class AdminLogoutView(APIView):
@@ -380,12 +421,12 @@ class AdminMeView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        if not request.user.is_staff:
+        if not request.user.is_staff and not request.user.is_superuser:
             return Response(
                 {"error": "Admin paneliga kirish huquqi yo'q"},
                 status=status.HTTP_403_FORBIDDEN,
             )
-        return Response({"user": AdminUserSerializer(request.user).data})
+        return Response({"user": AdminUserSerializer(request.user, context={"request": request}).data})
 
 
 class AdminUsersListView(ListAPIView):
