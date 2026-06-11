@@ -429,6 +429,7 @@ class AdminMeView(APIView):
         return Response({"user": AdminUserSerializer(request.user, context={"request": request}).data})
 
 
+
 class AdminUsersListView(ListAPIView):
     authentication_classes = [AdminTokenAuthentication]
     permission_classes = [IsAdminUser]
@@ -441,6 +442,168 @@ class AdminUserDetailView(RetrieveUpdateDestroyAPIView):
     permission_classes = [IsAdminUser]
     queryset = User.objects.all()
     serializer_class = AdminUserSerializer
+
+
+class AdminUserWhitelistView(APIView):
+    """User ni whitelist ga qo'shish yoki olib tashlash."""
+    authentication_classes = [AdminTokenAuthentication]
+    permission_classes = [IsAdminUser]
+
+    def post(self, request, pk):
+        try:
+            user = User.objects.get(pk=pk)
+        except User.DoesNotExist:
+            return Response({"error": "Foydalanuvchi topilmadi"}, status=status.HTTP_404_NOT_FOUND)
+
+        value = request.data.get("is_whitelisted")
+        if value is None:
+            # Toggle — hozirgi qiymatni teskari qilish
+            value = not user.is_whitelisted
+
+        user.is_whitelisted = bool(value)
+        user.save(update_fields=["is_whitelisted"])
+        logger.info(f"Admin {request.user.username}: user {user.username} whitelist={user.is_whitelisted}")
+        return Response({"is_whitelisted": user.is_whitelisted, "message": "Muvaffaqiyatli saqlandi"})
+
+
+class AdminUserOperatorView(APIView):
+    """User ni operator qilish yoki olib tashlash."""
+    authentication_classes = [AdminTokenAuthentication]
+    permission_classes = [IsAdminUser]
+
+    def post(self, request, pk):
+        try:
+            user = User.objects.get(pk=pk)
+        except User.DoesNotExist:
+            return Response({"error": "Foydalanuvchi topilmadi"}, status=status.HTTP_404_NOT_FOUND)
+
+        value = request.data.get("is_operator")
+        if value is None:
+            value = not user.is_operator
+
+        user.is_operator = bool(value)
+        user.save(update_fields=["is_operator"])
+        logger.info(f"Admin {request.user.username}: user {user.username} operator={user.is_operator}")
+        return Response({"is_operator": user.is_operator, "message": "Muvaffaqiyatli saqlandi"})
+
+
+class AdminUserStaffView(APIView):
+    """User ni staff (admin) qilish yoki olib tashlash. Faqat superuser amalga oshira oladi."""
+    authentication_classes = [AdminTokenAuthentication]
+    permission_classes = [IsAdminUser]
+
+    def post(self, request, pk):
+        if not request.user.is_superuser:
+            return Response(
+                {"error": "Staff huquqini faqat superuser o'zgartira oladi"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        try:
+            user = User.objects.get(pk=pk)
+        except User.DoesNotExist:
+            return Response({"error": "Foydalanuvchi topilmadi"}, status=status.HTTP_404_NOT_FOUND)
+
+        if user.pk == request.user.pk:
+            return Response({"error": "O'z huquqingizni o'zgartira olmaysiz"}, status=status.HTTP_400_BAD_REQUEST)
+
+        value = request.data.get("is_staff")
+        if value is None:
+            value = not user.is_staff
+
+        user.is_staff = bool(value)
+        user.save(update_fields=["is_staff"])
+        logger.info(f"Admin {request.user.username}: user {user.username} staff={user.is_staff}")
+        return Response({"is_staff": user.is_staff, "message": "Muvaffaqiyatli saqlandi"})
+
+
+class AdminUserBanView(APIView):
+    """User ni ban qilish yoki ban dan chiqarish."""
+    authentication_classes = [AdminTokenAuthentication]
+    permission_classes = [IsAdminUser]
+
+    def post(self, request, pk):
+        try:
+            user = User.objects.get(pk=pk)
+        except User.DoesNotExist:
+            return Response({"error": "Foydalanuvchi topilmadi"}, status=status.HTTP_404_NOT_FOUND)
+
+        if user.pk == request.user.pk:
+            return Response({"error": "O'zingizni ban qila olmaysiz"}, status=status.HTTP_400_BAD_REQUEST)
+
+        action = request.data.get("action")  # "ban" yoki "unban"
+
+        if action == "unban" or (action is None and user.is_banned):
+            # Ban dan chiqarish
+            user.is_banned = False
+            user.ban_reason = ""
+            user.banned_until = None
+            user.is_active = True
+            user.save(update_fields=["is_banned", "ban_reason", "banned_until", "is_active"])
+            logger.info(f"Admin {request.user.username}: user {user.username} UNBAN qilindi")
+            return Response({"is_banned": False, "message": f"{user.username} ban dan chiqarildi"})
+        else:
+            # Ban qilish
+            reason = request.data.get("reason", "Admin tomonidan ban qilindi")
+            banned_until = request.data.get("banned_until", None)  # ISO format yoki null
+
+            user.is_banned = True
+            user.ban_reason = reason
+            user.is_active = False
+            if banned_until:
+                from django.utils.dateparse import parse_datetime
+                user.banned_until = parse_datetime(banned_until)
+            else:
+                user.banned_until = None  # Doimiy ban
+            user.save(update_fields=["is_banned", "ban_reason", "banned_until", "is_active"])
+            logger.info(f"Admin {request.user.username}: user {user.username} BAN qilindi. Sabab: {reason}")
+            return Response({"is_banned": True, "message": f"{user.username} ban qilindi"})
+
+
+class AdminUserSuperuserView(APIView):
+    """User ni superuser qilish yoki superuserlikdan chiqarish.
+    Faqat mavjud superuserlar (is_superuser=True) amalga oshira oladi."""
+    authentication_classes = [AdminTokenAuthentication]
+    permission_classes = [IsAdminUser]
+
+    def post(self, request, pk):
+        # Faqat superuser bu amalni bajara oladi
+        if not request.user.is_superuser:
+            return Response(
+                {"error": "Superuser huquqini faqat superuser o'zgartira oladi"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        try:
+            user = User.objects.get(pk=pk)
+        except User.DoesNotExist:
+            return Response({"error": "Foydalanuvchi topilmadi"}, status=status.HTTP_404_NOT_FOUND)
+
+        # O'zini superuserlikdan chiqarib qo'yishining oldini olish
+        if user.pk == request.user.pk:
+            return Response(
+                {"error": "O'z superuser huquqingizni o'zgartira olmaysiz"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        value = request.data.get("is_superuser")
+        if value is None:
+            value = not user.is_superuser
+
+        user.is_superuser = bool(value)
+        # Superuser bo'lsa, staff ham bo'lishi kerak
+        if user.is_superuser:
+            user.is_staff = True
+            user.save(update_fields=["is_superuser", "is_staff"])
+        else:
+            user.save(update_fields=["is_superuser"])
+
+        action_str = "SUPERUSER qilindi" if user.is_superuser else "Superuserlikdan chiqarildi"
+        logger.info(f"Admin {request.user.username}: user {user.username} {action_str}")
+        return Response({
+            "is_superuser": user.is_superuser,
+            "is_staff": user.is_staff,
+            "message": f"{user.username} {action_str.lower()}",
+        })
 
 
 @api_view(["POST"])
@@ -796,7 +959,9 @@ class GoogleLoginView(APIView):
             logger.info("Google tokenini tekshirish boshlandi...")
             idinfo = id_token.verify_oauth2_token(
                 id_token_str, requests.Request(), settings.GOOGLE_CLIENT_ID,
-                clock_skew_in_seconds=10
+                # 60 sekund tolerans — server va Google vaqti farqi uchun.
+                # Xatolikda 40 sekund farq bor edi: '1781060430 < 1781060470'
+                clock_skew_in_seconds=60
             )
 
             if idinfo["iss"] not in [

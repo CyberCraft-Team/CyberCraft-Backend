@@ -21,7 +21,7 @@ env_file = BASE_DIR / ".env"
 if env_file.exists():
     environ.Env.read_env(str(env_file))
 
-if os.environ.get("RENDER"):
+if os.environ.get("PRODUCTION"):
     from .settings_prod import *
 else:
     SECRET_KEY = env("SECRET_KEY")
@@ -181,6 +181,10 @@ CORS_ALLOW_CREDENTIALS = True
 # (Minecraft MCEF va file:// protokoli uchun kerak)
 if DEBUG:
     CORS_ALLOW_ALL_ORIGINS = True
+    # Google OAuth popup window.postMessage ishlatadi.
+    # Django default COOP "same-origin" bu cross-origin xabarni bloklaydi.
+    # Development da o'chirib qo'yamiz:
+    SECURE_CROSS_ORIGIN_OPENER_POLICY = None
 
 EMAIL_BACKEND = env("EMAIL_BACKEND")
 DEFAULT_FROM_EMAIL = env("DEFAULT_FROM_EMAIL")
@@ -207,7 +211,7 @@ LOGGING = {
         "django": {
             "handlers": ["console"],
             "level": "INFO",
-            "propagate": True,
+            "propagate": False,
         },
         "django.server": {
             "handlers": ["console"],
@@ -217,12 +221,12 @@ LOGGING = {
         "apps": {
             "handlers": ["console"],
             "level": "DEBUG",
-            "propagate": True,
+            "propagate": False,
         },
         "api.requests": {
             "handlers": ["console"],
             "level": "INFO",
-            "propagate": True,
+            "propagate": False,
         },
     },
     "root": {

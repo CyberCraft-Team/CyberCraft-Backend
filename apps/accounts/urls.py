@@ -8,6 +8,11 @@ from .views import (
     AdminMeView,
     AdminUsersListView,
     AdminUserDetailView,
+    AdminUserWhitelistView,
+    AdminUserOperatorView,
+    AdminUserStaffView,
+    AdminUserBanView,
+    AdminUserSuperuserView,
     UserRegisterView,
     PlayerSkinView,
     SkinUploadView,
@@ -53,6 +58,11 @@ urlpatterns = [
     path(
         "admin/users/<int:pk>/", AdminUserDetailView.as_view(), name="admin-user-detail"
     ),
+    path("admin/users/<int:pk>/whitelist/", AdminUserWhitelistView.as_view(), name="admin-user-whitelist"),
+    path("admin/users/<int:pk>/operator/", AdminUserOperatorView.as_view(), name="admin-user-operator"),
+    path("admin/users/<int:pk>/staff/", AdminUserStaffView.as_view(), name="admin-user-staff"),
+    path("admin/users/<int:pk>/ban/", AdminUserBanView.as_view(), name="admin-user-ban"),
+    path("admin/users/<int:pk>/superuser/", AdminUserSuperuserView.as_view(), name="admin-user-superuser"),
     path("minecraft/auth/", minecraft_auth, name="minecraft-auth"),
     path("minecraft/verify/", MinecraftVerifyView.as_view(), name="minecraft-verify"),
     path(

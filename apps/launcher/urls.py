@@ -8,7 +8,7 @@ from .views import (
 urlpatterns = [
     path("launcher/servers/", LauncherServersView.as_view(), name="launcher-servers"),
     path(
-        "servers/<str:server_id>/manifest/",
+        "launcher/servers/<str:server_id>/manifest/",
         LauncherServerManifestView.as_view(),
         name="launcher-server-manifest",
     ),

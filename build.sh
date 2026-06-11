@@ -1,3 +1,6 @@
+#!/bin/bash
+# CyberCraft — Build/Deploy Script
+# Production da ishga tushirilganda collectstatic, migrate, va superuser yaratadi.
 set -o errexit
 
 pip install -r requirements.txt
@@ -6,13 +9,20 @@ python manage.py collectstatic --no-input
 
 python manage.py migrate
 
-# Superuser yaratish (agar mavjud bo'lmasa)
+# Superuser yaratish — env dan olinadi (hardcoded emas!)
 python manage.py shell -c "
 from django.contrib.auth import get_user_model
+import os
+
 User = get_user_model()
-if not User.objects.filter(username='lxz_404').exists():
-    User.objects.create_superuser('lxz_404', '', 'Pashol_2321235')
-    print('Superuser yaratildi!')
+username = os.environ.get('DJANGO_SUPERUSER_USERNAME')
+password = os.environ.get('DJANGO_SUPERUSER_PASSWORD')
+
+if not username or not password:
+    print('DJANGO_SUPERUSER_USERNAME va DJANGO_SUPERUSER_PASSWORD env da topilmadi. Superuser yaratilmadi.')
+elif User.objects.filter(username=username).exists():
+    print(f'Superuser \"{username}\" allaqachon mavjud.')
 else:
-    print('Superuser allaqachon mavjud.')
+    User.objects.create_superuser(username, '', password)
+    print(f'Superuser \"{username}\" yaratildi!')
 "
