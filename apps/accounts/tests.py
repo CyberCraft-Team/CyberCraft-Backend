@@ -92,6 +92,22 @@ class AuthAPITest(TestCase):
         self.client = APIClient()
 
     def test_register(self):
+        import io
+        from PIL import Image
+        from django.core.files.uploadedfile import SimpleUploadedFile
+
+        # Generates a dummy 64x32 PNG skin
+        file_io = io.BytesIO()
+        image = Image.new("RGBA", size=(64, 32), color=(255, 0, 0, 255))
+        image.save(file_io, "PNG")
+        file_io.seek(0)
+
+        dummy_skin = SimpleUploadedFile(
+            name="steve.png",
+            content=file_io.read(),
+            content_type="image/png"
+        )
+
         response = self.client.post(
             "/api/v1/auth/register/",
             {
@@ -99,8 +115,9 @@ class AuthAPITest(TestCase):
                 "email": "new@test.com",
                 "password": "pass123456",
                 "password_confirm": "pass123456",
+                "skin": dummy_skin,
             },
-            format="json",
+            format="multipart",
         )
         self.assertEqual(response.status_code, 201)
         self.assertTrue(User.objects.filter(username="newuser").exists())
@@ -149,7 +166,7 @@ class HealthCheckTest(TestCase):
 
     def test_health_check(self):
         client = APIClient()
-        response = client.get("/api/health/")
+        response = client.get("/api/v1/health/")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["status"], "ok")
         self.assertIn("database", response.data["checks"])

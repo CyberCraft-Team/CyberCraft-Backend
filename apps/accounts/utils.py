@@ -62,3 +62,43 @@ def send_password_reset_email(user, token):
     except Exception as e:
         logger.error("Failed to send password reset email to %s: %s", user.email, e)
         return False
+
+
+def process_and_save_skin(user, skin_file):
+    """Yuklangan skin faylini qayta ishlaydi va foydalanuvchiga biriktiradi.
+    Yuz qismini (face) avtomatik kesib oladi.
+    """
+    from PIL import Image
+    import io
+    from django.core.files.base import ContentFile
+
+    img = Image.open(skin_file)
+
+    # Esda tuting: skin o'lchamlari validator orqali tekshirilgan.
+    # User skin va skin_face larini tozalash (agar mavjud bo'lsa)
+    if user.skin:
+        user.skin.delete(save=False)
+    if user.skin_face:
+        user.skin_face.delete(save=False)
+
+    # Face kesib olish (8, 8, 16, 16)
+    face = img.crop((8, 8, 16, 16))
+    face_scaled = face.resize((64, 64), Image.NEAREST)
+
+    face_io = io.BytesIO()
+    face_scaled.save(face_io, format="PNG")
+    face_io.seek(0)
+
+    skin_file.seek(0)
+    user.skin.save(
+        f"{user.username}_skin.png",
+        ContentFile(skin_file.read()),
+        save=False,
+    )
+
+    user.skin_face.save(
+        f"{user.username}_face.png",
+        ContentFile(face_io.read()),
+        save=True,
+    )
+

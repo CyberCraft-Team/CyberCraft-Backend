@@ -116,16 +116,16 @@ class PlayerSkinView(APIView):
 
 
 class UserRegisterView(APIView):
+    throttle_scope = "sensitive"
     permission_classes = [AllowAny]
     authentication_classes = []
+    parser_classes = [MultiPartParser, FormParser]
 
     def post(self, request):
-        serializer = UserRegisterSerializer(data=request.data)
+        serializer = UserRegisterSerializer(data=request.data, context={"request": request})
 
         if serializer.is_valid():
             user = serializer.save()
-
-            assign_random_skin(user)
 
             return Response(
                 {
@@ -146,6 +146,7 @@ class UserRegisterView(APIView):
 
 
 class LauncherLoginView(APIView):
+    throttle_scope = "sensitive"
     permission_classes = [AllowAny]
     authentication_classes = []
 
@@ -358,6 +359,7 @@ class CapeUploadView(APIView):
 
 
 class AdminLoginView(APIView):
+    throttle_scope = "sensitive"
     permission_classes = [AllowAny]
     authentication_classes = []
 
@@ -779,6 +781,7 @@ class MinecraftVerifyView(APIView):
 class SendVerificationEmailView(APIView):
     """Email tasdiqlash xabarini yuborish."""
 
+    throttle_scope = "sensitive"
     authentication_classes = [LauncherTokenAuthentication]
     permission_classes = [IsAuthenticated]
 
@@ -856,6 +859,7 @@ class VerifyEmailView(APIView):
 class RequestPasswordResetView(APIView):
     """Parol tiklash so'rovi."""
 
+    throttle_scope = "sensitive"
     permission_classes = [AllowAny]
     authentication_classes = []
 
@@ -891,6 +895,7 @@ class RequestPasswordResetView(APIView):
 class ConfirmPasswordResetView(APIView):
     """Yangi parol o'rnatish."""
 
+    throttle_scope = "sensitive"
     permission_classes = [AllowAny]
     authentication_classes = []
 
@@ -987,17 +992,53 @@ class GoogleLoginView(APIView):
             is_new_user = False
 
             if not user:
-                logger.info(f"Yangi foydalanuvchi yaratish: {email}")
+                # Yangi foydalanuvchi — username kiritilishi shart
+                username = request.data.get("username")
+                if not username:
+                    logger.info(f"Google login: yangi foydalanuvchi uchun username talab qilinadi: {email}")
+                    return Response(
+                        {
+                            "needs_username": True,
+                            "email": email,
+                            "is_new_user": True
+                        },
+                        status=status.HTTP_200_OK
+                    )
+
+                username = username.strip()
+                if not username:
+                    return Response(
+                        {"error": "Username kiritilishi shart"},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+
+                if len(username) < 3:
+                    return Response(
+                        {"error": "Username kamida 3 ta belgi bo'lishi kerak"},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+
+                if len(username) > 16:
+                    return Response(
+                        {"error": "Username 16 ta belgidan oshmasligi kerak"},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+
+                import re
+                if not re.match(r'^[a-zA-Z0-9_]+$', username):
+                    return Response(
+                        {"error": "Username faqat harflar, raqamlar va pastki chiziqdan (_) iborat bo'lishi kerak"},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+
+                if User.objects.filter(username__iexact=username).exists():
+                    return Response(
+                        {"error": "Bu username allaqachon mavjud"},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+
+                logger.info(f"Yangi foydalanuvchi yaratish (Google): {email} -> {username}")
                 is_new_user = True
-                username = email.split("@")[0]
-
-                # Username band bo'lsa, tasodifiy raqam qo'shish
-                base_username = username
-                counter = 1
-                while User.objects.filter(username=username).exists():
-                    username = f"{base_username}{counter}"
-                    counter += 1
-
                 user = User.objects.create_user(
                     username=username,
                     email=email,
@@ -1009,9 +1050,13 @@ class GoogleLoginView(APIView):
                 logger.info(f"Foydalanuvchi yaratildi: {username}")
 
                 # Tasodifiy skin tayinlash
-                from .views import assign_random_skin
                 assign_random_skin(user)
                 logger.info("Random skin tayinlandi")
+            else:
+                if not user.is_email_verified:
+                    user.is_email_verified = True
+                    user.save(update_fields=["is_email_verified"])
+                    logger.info(f"Mavjud foydalanuvchining emaili Google orqali tasdiqlandi: {user.username}")
 
             if not user.is_active:
                 logger.warning(f"Foydalanuvchi faol emas: {user.username}")

@@ -11,6 +11,11 @@ env = environ.Env(
     ALLOWED_HOSTS=(list, ["localhost", "127.0.0.1"]),
     CORS_ORIGINS=(str, "http://localhost:3000,http://127.0.0.1:3000"),
     EMAIL_BACKEND=(str, "django.core.mail.backends.console.EmailBackend"),
+    EMAIL_HOST=(str, "smtp.gmail.com"),
+    EMAIL_PORT=(int, 587),
+    EMAIL_HOST_USER=(str, ""),
+    EMAIL_HOST_PASSWORD=(str, ""),
+    EMAIL_USE_TLS=(bool, True),
     DEFAULT_FROM_EMAIL=(str, "noreply@cybercraft.uz"),
     SITE_URL=(str, "http://localhost:3000"),
     GOOGLE_CLIENT_ID=(str, None),
@@ -156,10 +161,12 @@ REST_FRAMEWORK = {
     "DEFAULT_THROTTLE_CLASSES": [
         "rest_framework.throttling.AnonRateThrottle",
         "rest_framework.throttling.UserRateThrottle",
+        "rest_framework.throttling.ScopedRateThrottle",
     ],
     "DEFAULT_THROTTLE_RATES": {
-        "anon": "20/minute",
-        "user": "60/minute",
+        "anon": env("THROTTLE_RATE_ANON", default="150/minute"),
+        "user": env("THROTTLE_RATE_USER", default="500/minute"),
+        "sensitive": env("THROTTLE_RATE_SENSITIVE", default="5/minute"),
     },
     "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
     "PAGE_SIZE": 20,
@@ -187,6 +194,11 @@ if DEBUG:
     SECURE_CROSS_ORIGIN_OPENER_POLICY = None
 
 EMAIL_BACKEND = env("EMAIL_BACKEND")
+EMAIL_HOST = env("EMAIL_HOST")
+EMAIL_PORT = env("EMAIL_PORT")
+EMAIL_HOST_USER = env("EMAIL_HOST_USER")
+EMAIL_HOST_PASSWORD = env("EMAIL_HOST_PASSWORD")
+EMAIL_USE_TLS = env("EMAIL_USE_TLS")
 DEFAULT_FROM_EMAIL = env("DEFAULT_FROM_EMAIL")
 SITE_URL = env("SITE_URL")
 GOOGLE_CLIENT_ID = env("GOOGLE_CLIENT_ID")

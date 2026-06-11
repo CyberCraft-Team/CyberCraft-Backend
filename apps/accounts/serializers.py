@@ -66,6 +66,7 @@ class UserMinimalSerializer(MediaUrlMixin, serializers.ModelSerializer):
             "cc_balance",
             "rank",
             "referral_code",
+            "is_email_verified",
         ]
 
 
@@ -100,6 +101,7 @@ class UserRegisterSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True, min_length=6)
     password_confirm = serializers.CharField(write_only=True)
     referral_code = serializers.CharField(required=False, allow_blank=True)
+    skin = serializers.ImageField(write_only=True, required=True)
 
     class Meta:
         model = User
@@ -109,6 +111,7 @@ class UserRegisterSerializer(serializers.ModelSerializer):
             "password",
             "password_confirm",
             "referral_code",
+            "skin",
         ]
 
     def validate_username(self, value):
@@ -122,11 +125,36 @@ class UserRegisterSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 "Username 16 ta belgidan oshmasligi kerak"
             )
+        import re
+        if not re.match(r'^[a-zA-Z0-9_]+$', value):
+            raise serializers.ValidationError(
+                "Username faqat harflar, raqamlar va pastki chiziqdan (_) iborat bo'lishi kerak"
+            )
         return value
 
     def validate_email(self, value):
         if User.objects.filter(email__iexact=value).exists():
             raise serializers.ValidationError("Bu email allaqachon ro'yxatdan o'tgan")
+        return value
+
+    def validate_skin(self, value):
+        if not value:
+            raise serializers.ValidationError("Skin fayli yuklanishi shart")
+
+        if not value.name.lower().endswith(".png"):
+            raise serializers.ValidationError("Faqat PNG formatdagi fayllar qabul qilinadi")
+
+        if value.size > 256 * 1024:
+            raise serializers.ValidationError("Skin fayl hajmi 256KB dan oshmasligi kerak")
+
+        try:
+            from PIL import Image
+            img = Image.open(value)
+            if img.size not in [(64, 64), (64, 32)]:
+                raise serializers.ValidationError("Skin o'lchami 64x64 yoki 64x32 bo'lishi kerak")
+        except Exception as e:
+            raise serializers.ValidationError(f"Skin faylini tekshirishda xatolik: {str(e)}")
+
         return value
 
     def validate(self, data):
@@ -140,6 +168,7 @@ class UserRegisterSerializer(serializers.ModelSerializer):
         validated_data.pop("password_confirm")
         password = validated_data.pop("password")
         referral_code = validated_data.pop("referral_code", None)
+        skin_file = validated_data.pop("skin")
 
         referrer = None
         if referral_code:
@@ -150,6 +179,9 @@ class UserRegisterSerializer(serializers.ModelSerializer):
             user.referred_by = referrer
         user.set_password(password)
         user.save()
+
+        from .utils import process_and_save_skin
+        process_and_save_skin(user, skin_file)
 
         if referrer:
             from apps.rewards.models import CCTransaction
@@ -173,3 +205,4 @@ class UserRegisterSerializer(serializers.ModelSerializer):
             )
 
         return user
+

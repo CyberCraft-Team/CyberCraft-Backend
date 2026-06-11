@@ -110,10 +110,10 @@ def create_server_types():
         )
         if is_created:
             created += 1
-            print(f"✓ Yaratildi: {config['display_name']}")
+            print(f"[+] Yaratildi: {config['display_name']}")
         else:
             updated += 1
-            print(f"↻ Yangilandi: {config['display_name']}")
+            print(f"[*] Yangilandi: {config['display_name']}")
 
     print(f"\nJami: {created} ta yaratildi, {updated} ta yangilandi")
 
