@@ -173,7 +173,9 @@ class LauncherLoginView(APIView):
                 {"error": "Akkaunt faol emas"}, status=status.HTTP_403_FORBIDDEN
             )
 
-        token, created = LauncherToken.objects.get_or_create(user=user)
+        # Faqat eskirgan (expired) tokenlarni o'chirish va yangi yaratish
+        LauncherToken.objects.filter(user=user, expires_at__lt=timezone.now()).delete()
+        token = LauncherToken.objects.create(user=user)
 
         return Response(
             {
@@ -1064,8 +1066,8 @@ class GoogleLoginView(APIView):
                     {"error": "Akkaunt faol emas"}, status=status.HTTP_403_FORBIDDEN
                 )
 
-            # LauncherToken yaratish (vebsayt va launcher uchun)
-            LauncherToken.objects.filter(user=user).delete()
+            # LauncherToken yaratish (vebsayt va launcher uchun, faqat eskirganlarini o'chirish)
+            LauncherToken.objects.filter(user=user, expires_at__lt=timezone.now()).delete()
             token = LauncherToken.objects.create(user=user)
             logger.info(f"Token yaratildi: {user.username}")
 
@@ -1152,8 +1154,8 @@ class TelegramLoginView(APIView):
             # Skin tayinlash
             assign_random_skin(user)
 
-        # Token yaratish
-        LauncherToken.objects.filter(user=user).delete()
+        # Token yaratish (faqat eskirganlarini o'chirish)
+        LauncherToken.objects.filter(user=user, expires_at__lt=timezone.now()).delete()
         token = LauncherToken.objects.create(user=user)
 
         return Response({

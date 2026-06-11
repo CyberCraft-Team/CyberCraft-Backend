@@ -9,9 +9,9 @@ class LauncherToken(models.Model):
     TOKEN_LIFETIME_DAYS = 30
 
     key = models.CharField(max_length=64, primary_key=True)
-    user = models.OneToOneField(
+    user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
-        related_name="launcher_token",
+        related_name="launcher_tokens",
         on_delete=models.CASCADE,
     )
     created_at = models.DateTimeField(auto_now_add=True)
