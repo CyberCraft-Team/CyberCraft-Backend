@@ -3,6 +3,7 @@ from .views import (
     LauncherServersView,
     LauncherServerManifestView,
     LauncherUpdateCheckView,
+    LauncherWSTokenView,
 )
 
 urlpatterns = [
@@ -16,5 +17,10 @@ urlpatterns = [
         "launcher/update/",
         LauncherUpdateCheckView.as_view(),
         name="launcher-update-check",
+    ),
+    path(
+        "launcher/ws-token/",
+        LauncherWSTokenView.as_view(),
+        name="launcher-ws-token",
     ),
 ]

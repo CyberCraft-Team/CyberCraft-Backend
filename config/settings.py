@@ -56,6 +56,7 @@ INSTALLED_APPS = [
     "apps.rewards.apps.RewardsConfig",
     "apps.auditlog.apps.AuditlogConfig",
     "apps.notifications.apps.NotificationsConfig",
+    "apps.yggdrasil_auth.apps.YggdrasilAuthConfig",
 ]
 
 MIDDLEWARE = [

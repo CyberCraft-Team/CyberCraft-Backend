@@ -14,6 +14,7 @@ api_v1_patterns = [
     path("", include("apps.voting.urls")),
     path("rewards/", include("apps.rewards.urls")),
     path("notifications/", include("apps.notifications.urls")),
+    path("yggdrasil/", include("apps.yggdrasil_auth.urls")),
     path("health/", HealthCheckView.as_view(), name="health-check"),
     path("schema/", SpectacularAPIView.as_view(), name="schema"),
     path(

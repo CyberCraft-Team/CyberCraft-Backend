@@ -9,7 +9,10 @@ os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings")
 
 django_asgi_app = get_asgi_application()
 
-from apps.servers.routing import websocket_urlpatterns
+from apps.servers.routing import websocket_urlpatterns as servers_websocket_urlpatterns
+from apps.launcher.routing import websocket_urlpatterns as launcher_websocket_urlpatterns
+
+websocket_urlpatterns = servers_websocket_urlpatterns + launcher_websocket_urlpatterns
 
 
 class TokenAuthMiddleware(BaseMiddleware):

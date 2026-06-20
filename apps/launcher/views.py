@@ -5,6 +5,7 @@ from django.conf import settings
 import os
 from apps.servers.models import Server, MinecraftServer, ServerTypeConfig
 from .authentication import LauncherTokenAuthentication
+from .models import WSToken
 
 
 class LauncherServersView(APIView):
@@ -342,7 +343,7 @@ class LauncherServerManifestView(APIView):
 
                 if f.file_type == "mod":
                     manifest["files"]["mods"].append(file_data)
-                elif f.file_type == "resourcepack":
+                elif f.file_type in ("resource", "resourcepack"):
                     manifest["files"]["resourcepacks"].append(file_data)
                 elif f.file_type == "shader":
                     manifest["files"]["shaders"].append(file_data)
@@ -397,3 +398,22 @@ class LauncherUpdateCheckView(APIView):
                 "file_size": latest.file_size,
             }
         )
+
+
+class LauncherWSTokenView(APIView):
+    """WebSocket ulanishi uchun qisqa muddatli token olish"""
+
+    authentication_classes = [LauncherTokenAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        ws_token = WSToken.create_for_user(request.user)
+        return Response({
+            "token": ws_token.key,
+            "expires_at": ws_token.expires_at.isoformat(),
+            "ws_endpoints": {
+                "status": "/ws/launcher/status/",
+                "console": "/ws/launcher/console/<server_id>/",
+                "events": "/ws/launcher/events/",
+            }
+        })
