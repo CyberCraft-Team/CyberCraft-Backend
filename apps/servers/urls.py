@@ -23,6 +23,7 @@ from .views import (
     AdminSocialLinkDetailView,
     MinecraftServerImageUploadView,
     MinecraftServerGalleryUploadView,
+    MinecraftServerPlayersView,
 )
 
 urlpatterns = [
@@ -93,6 +94,11 @@ urlpatterns = [
         "minecraft/servers/<uuid:server_id>/files/",
         MinecraftServerFilesView.as_view(),
         name="minecraft-server-files",
+    ),
+    path(
+        "minecraft/servers/<uuid:server_id>/players/",
+        MinecraftServerPlayersView.as_view(),
+        name="minecraft-server-players",
     ),
     path(
         "minecraft/servers/<uuid:server_id>/images/",

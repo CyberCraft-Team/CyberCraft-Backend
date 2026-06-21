@@ -1,9 +1,11 @@
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import IsAuthenticated, AllowAny
 from django.conf import settings
+from django.http import FileResponse, Http404
 import os
-from apps.servers.models import Server, MinecraftServer, ServerTypeConfig
+import mimetypes
+from apps.servers.models import Server, MinecraftServer, ServerTypeConfig, ServerMod, ModpackFile
 from .authentication import LauncherTokenAuthentication
 from .models import WSToken
 
@@ -240,15 +242,16 @@ class LauncherServerManifestView(APIView):
 
         mods = server.mods.filter(status="enabled")
         for mod in mods:
+            download_url = request.build_absolute_uri(
+                f"/api/v1/launcher/download/mod/{mod.id}/"
+            ) if mod.file else None
             manifest["files"]["mods"].append(
                 {
                     "name": mod.file_name,
                     "hash": mod.sha256_hash or "",
                     "size": mod.file_size or 0,
                     "required": True,
-                    "url": (
-                        request.build_absolute_uri(mod.file.url) if mod.file else None
-                    ),
+                    "url": download_url,
                 }
             )
 
@@ -333,12 +336,15 @@ class LauncherServerManifestView(APIView):
         if server.modpack:
             files = server.modpack.files.filter(is_active=True)
             for f in files:
+                download_url = request.build_absolute_uri(
+                    f"/api/v1/launcher/download/modpack-file/{f.id}/"
+                ) if f.file else None
                 file_data = {
                     "name": f.relative_path.split("/")[-1],
                     "hash": f.sha256_hash or "",
                     "size": f.file_size or 0,
                     "required": f.is_required,
-                    "url": (request.build_absolute_uri(f.file.url) if f.file else None),
+                    "url": download_url,
                 }
 
                 if f.file_type == "mod":
@@ -417,3 +423,67 @@ class LauncherWSTokenView(APIView):
                 "events": "/ws/launcher/events/",
             }
         })
+
+
+class ModFileDownloadView(APIView):
+    """Launcher uchun mod fayllarni yuklab olish (ServerMod)"""
+    authentication_classes = [LauncherTokenAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, mod_id):
+        try:
+            mod = ServerMod.objects.get(id=mod_id)
+        except ServerMod.DoesNotExist:
+            raise Http404("Mod topilmadi")
+
+        if not mod.file:
+            raise Http404("Mod faylga ega emas")
+
+        file_path = mod.file.path
+        if not os.path.exists(file_path):
+            raise Http404("Mod fayli diskda topilmadi")
+
+        content_type, _ = mimetypes.guess_type(file_path)
+        if not content_type:
+            content_type = "application/octet-stream"
+
+        response = FileResponse(
+            open(file_path, "rb"),
+            content_type=content_type,
+        )
+        response["Content-Disposition"] = f'attachment; filename="{mod.file_name}"'
+        response["Content-Length"] = os.path.getsize(file_path)
+        return response
+
+
+class ModpackFileDownloadView(APIView):
+    """Launcher uchun modpack fayllarni yuklab olish (ModpackFile)"""
+    authentication_classes = [LauncherTokenAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, file_id):
+        try:
+            f = ModpackFile.objects.get(id=file_id)
+        except ModpackFile.DoesNotExist:
+            raise Http404("Fayl topilmadi")
+
+        if not f.file:
+            raise Http404("Fayl mavjud emas")
+
+        file_path = f.file.path
+        if not os.path.exists(file_path):
+            raise Http404("Fayl diskda topilmadi")
+
+        content_type, _ = mimetypes.guess_type(file_path)
+        if not content_type:
+            content_type = "application/octet-stream"
+
+        file_name = f.relative_path.split("/")[-1] if f.relative_path else os.path.basename(file_path)
+
+        response = FileResponse(
+            open(file_path, "rb"),
+            content_type=content_type,
+        )
+        response["Content-Disposition"] = f'attachment; filename="{file_name}"'
+        response["Content-Length"] = os.path.getsize(file_path)
+        return response

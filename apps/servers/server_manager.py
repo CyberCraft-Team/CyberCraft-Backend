@@ -6,6 +6,8 @@ import shutil
 import zipfile
 import glob as glob_module
 import platform
+import json
+import time
 from datetime import datetime
 
 from django.conf import settings
@@ -33,6 +35,8 @@ class MinecraftServerManager:
     _processes = {}
     _log_threads = {}
     _is_shutting_down = False
+    _online_players = {}
+    _monitor_thread = None
 
     @classmethod
     def get_servers_root(cls):
@@ -360,29 +364,16 @@ enable-command-block=true
     def start_server(cls, server):
         from .models import MinecraftServer, ServerLog
 
-        print(f"[DEBUG] start_server called for server: {server.id}")
-        print(f"[DEBUG] server.server_jar: {server.server_jar}")
-        print(f"[DEBUG] server.server_type: {server.server_type}")
-        print(f"[DEBUG] server.is_installed: {server.is_installed}")
-
         if str(server.id) in cls._processes:
             raise Exception("Server allaqachon ishlayapti")
 
         server_path = cls.get_server_path(server)
-        print(f"[DEBUG] server_path: {server_path}")
-        print(f"[DEBUG] server_path exists: {os.path.exists(server_path)}")
-
-        if os.path.exists(server_path):
-            files = os.listdir(server_path)
-            print(f"[DEBUG] Files in server_path: {files}")
 
         server_type_config = None
         if server.server_jar and server.server_jar.server_type:
             server_type_config = server.server_jar.server_type
         elif server.server_type:
             server_type_config = server.server_type
-
-        print(f"[DEBUG] server_type_config: {server_type_config}")
 
         if (
             server_type_config
@@ -403,20 +394,12 @@ enable-command-block=true
             cls.broadcast_status_update()
 
         if server_type_config:
-            print(
-                f"[DEBUG] server_type_config.requires_args_file: {server_type_config.requires_args_file}"
-            )
-            print(
-                f"[DEBUG] server_type_config.run_command: {server_type_config.run_command}"
-            )
-
             if server_type_config.requires_args_file:
                 java_cmd = cls._build_forge_command(
                     server_path, server_type_config, server
                 )
             else:
                 run_cmd_str = server_type_config.get_run_command(server)
-                print(f"[DEBUG] run_cmd_str: {run_cmd_str}")
                 import shlex
 
                 java_cmd = shlex.split(run_cmd_str)
@@ -465,33 +448,26 @@ enable-command-block=true
                     "nogui",
                 ]
 
-        # Force online mode to True and recreate server.properties
         server.online_mode = True
         server.save(update_fields=["online_mode"])
         cls.create_server_properties(server)
 
-        # Secure server-side using authlib-injector
         authlib_path = os.path.join(settings.BASE_DIR, "config", "authlib-injector.jar").replace("\\", "/")
         ensure_backend_authlib_injector(authlib_path)
         
-        # Detect the correct Django backend URL (prioritizing BACKEND_URL, otherwise defaulting to localhost)
-        # We add a trailing slash to avoid 301/302 redirects which can cause issues with Java's HTTP client.
         backend_url = getattr(settings, "BACKEND_URL", "http://127.0.0.1:8000")
         yggdrasil_url = f"{backend_url.rstrip('/')}/api/v1/yggdrasil/"
         agent_arg = f"-javaagent:{authlib_path}={yggdrasil_url}"
 
-        # Inject into java_cmd if running java directly (cleaning any existing javaagents pointing to authlib-injector first)
         if java_cmd and (java_cmd[0] == "java" or java_cmd[0].endswith("/java") or java_cmd[0].endswith("\\java") or java_cmd[0].endswith("java.exe")):
             java_cmd = [arg for arg in java_cmd if not (arg.startswith("-javaagent:") and "authlib-injector" in arg)]
             java_cmd.insert(1, agent_arg)
 
-        # Inject/replace in user_jvm_args.txt if Forge
         user_args_path = os.path.join(server_path, "user_jvm_args.txt")
         if os.path.exists(user_args_path):
             try:
                 with open(user_args_path, "r", encoding="utf-8") as f:
                     content = f.read()
-                # Remove any existing -javaagent pointing to authlib-injector
                 lines = content.splitlines()
                 cleaned_lines = [l for l in lines if not ("-javaagent:" in l and "authlib-injector" in l)]
                 cleaned_lines.append(agent_arg)
@@ -500,13 +476,11 @@ enable-command-block=true
             except Exception as e:
                 print(f"[DEBUG] Failed to write to user_jvm_args.txt: {e}")
 
-        # Patch run.bat or run.sh if they exist in server path
         run_bat_path = os.path.join(server_path, "run.bat")
         if os.path.exists(run_bat_path):
             try:
                 with open(run_bat_path, "r", encoding="utf-8") as f:
                     content = f.read()
-                # Remove any existing authlib-injector -javaagent argument from the content
                 cleaned_content = re.sub(r"-javaagent:[^\s]*authlib-injector[^\s]*", "", content)
                 new_content = re.sub(r"\bjava\b", f"java {agent_arg}", cleaned_content, flags=re.IGNORECASE)
                 if new_content != content:
@@ -528,8 +502,6 @@ enable-command-block=true
             except Exception as e:
                 print(f"[DEBUG] Failed to patch run.sh: {e}")
 
-        print(f"[DEBUG] java_cmd: {java_cmd}")
-
         try:
             process = subprocess.Popen(
                 java_cmd,
@@ -546,6 +518,8 @@ enable-command-block=true
             server.last_started = datetime.now()
             server.save()
 
+            cls._online_players[str(server.id)] = set()
+
             log_thread = threading.Thread(
                 target=cls._read_server_logs, args=(server, process), daemon=True
             )
@@ -558,16 +532,14 @@ enable-command-block=true
                 message=f"Server ishga tushirilmoqda PID: {process.pid}",
             )
 
+            cls.start_monitoring()
             return True
 
         except Exception as e:
-            print(f"[DEBUG] start_server exception: {e}")
             server.status = MinecraftServer.Status.ERROR
             server.save()
             ServerLog.objects.create(
-                server=server,
-                level="error",
-                message=f"Serverni ishga tushirishda xato: {str(e)}",
+                server=server, level="error", message=f"Serverni ishga tushirishda xato: {str(e)}",
             )
             raise e
 
@@ -672,6 +644,25 @@ enable-command-block=true
                     server.current_players = int(player_match.group(1))
                     server.save()
 
+                join_match = re.search(r"\]: ([a-zA-Z0-9_]+) joined the game", line)
+                if join_match:
+                    player_name = join_match.group(1)
+                    if server_id not in cls._online_players:
+                        cls._online_players[server_id] = set()
+                    cls._online_players[server_id].add(player_name)
+                    server.current_players = len(cls._online_players[server_id])
+                    server.save(update_fields=["current_players"])
+                    cls.broadcast_status_update()
+
+                leave_match = re.search(r"\]: ([a-zA-Z0-9_]+) left the game", line)
+                if leave_match:
+                    player_name = leave_match.group(1)
+                    if server_id in cls._online_players:
+                        cls._online_players[server_id].discard(player_name)
+                    server.current_players = len(cls._online_players.get(server_id, []))
+                    server.save(update_fields=["current_players"])
+                    cls.broadcast_status_update()
+
                 log_entry = ServerLog.objects.create(
                     server=server, level=level, message=line
                 )
@@ -698,11 +689,7 @@ enable-command-block=true
                                 "timestamp": log_entry.timestamp.isoformat(),
                             },
                         )
-                    except RuntimeError:
-                        # 'cannot schedule new futures after shutdown' xatosini ushlab qolamiz
-                        pass
                     except Exception:
-                        # Interpreter shutdown paytida yoki executor yopilganda xatoni e'tiborsiz qoldiramiz
                         pass
 
         except Exception as e:
@@ -715,6 +702,8 @@ enable-command-block=true
                 server.status = MinecraftServer.Status.STOPPED
                 server.pid = None
                 server.current_players = 0
+                if server_id in cls._online_players:
+                    cls._online_players[server_id].clear()
                 server.save()
 
                 if server_id in cls._processes:
@@ -727,9 +716,6 @@ enable-command-block=true
                     )
                     cls.broadcast_status_update()
             except Exception:
-                # Shutdown paytida barcha xatolarni o'tkazib yuboramiz
-                if server_id in cls._processes:
-                    del cls._processes[server_id]
                 pass
 
     @classmethod
@@ -784,9 +770,7 @@ enable-command-block=true
         if cls._is_shutting_down:
             return
         cls._is_shutting_down = True
-        print(f"[SHUTDOWN] {len(cls._processes)} ta server to'xtatilmoqda...")
         
-
         processes = list(cls._processes.values())
         cls._processes.clear()
         
@@ -797,26 +781,16 @@ enable-command-block=true
             except Exception:
                 pass
         
-        import time
-        start_wait = time.time()
-        while processes and (time.time() - start_wait < 10):
-            processes = [p for p in processes if p.poll() is None]
-            if processes:
-                time.sleep(0.5)
-        
+        time.sleep(2)
         for process in processes:
             try:
                 process.kill()
             except Exception:
                 pass
 
-        print("[SHUTDOWN] Barcha serverlar to'xtatildi.")
-
     @classmethod
     def restart_server(cls, server):
         cls.stop_server(server)
-        import time
-
         time.sleep(2)
         cls.start_server(server)
 
@@ -855,6 +829,7 @@ enable-command-block=true
             "pid": server.pid,
             "current_players": server.current_players,
             "max_players": server.max_players,
+            "online_player_list": list(cls._online_players.get(server_id, [])),
             "minecraft_version": server.minecraft_version,
             "server_type": (
                 server.server_type.server_type if server.server_type else None
@@ -1016,3 +991,176 @@ enable-command-block=true
             f.write(content)
 
         return True
+
+    @classmethod
+    def start_monitoring(cls):
+        if cls._monitor_thread and cls._monitor_thread.is_alive():
+            return
+        cls._monitor_thread = threading.Thread(target=cls._monitor_loop, daemon=True)
+        cls._monitor_thread.start()
+
+    @classmethod
+    def _monitor_loop(cls):
+        import psutil
+        
+        channel_layer = get_channel_layer()
+        while not cls._is_shutting_down:
+            time.sleep(2)
+            for server_id, process in list(cls._processes.items()):
+                try:
+                    if process.poll() is not None:
+                        continue
+                    pid = process.pid
+                    proc = psutil.Process(pid)
+                    
+                    cpu = proc.cpu_percent(interval=None)
+                    mem_info = proc.memory_info()
+                    memory_mb = mem_info.rss / (1024 * 1024)
+                    
+                    if channel_layer:
+                        async_to_sync(channel_layer.group_send)(
+                            f"server_{server_id}",
+                            {
+                                "type": "server_stats",
+                                "stats": {
+                                    "cpu": cpu,
+                                    "memory": round(memory_mb, 1),
+                                    "timestamp": datetime.now().isoformat()
+                                }
+                            }
+                        )
+                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                    pass
+                except Exception as e:
+                    print(f"Error in monitor loop: {e}")
+
+    @classmethod
+    def get_player_lists(cls, server):
+        server_path = cls.get_server_path(server)
+        
+        whitelist_path = os.path.join(server_path, "whitelist.json")
+        ops_path = os.path.join(server_path, "ops.json")
+        banned_path = os.path.join(server_path, "banned-players.json")
+        
+        whitelist = []
+        if os.path.exists(whitelist_path):
+            try:
+                with open(whitelist_path, "r", encoding="utf-8") as f:
+                    whitelist = json.load(f)
+            except Exception:
+                pass
+                
+        ops = []
+        if os.path.exists(ops_path):
+            try:
+                with open(ops_path, "r", encoding="utf-8") as f:
+                    ops = json.load(f)
+            except Exception:
+                pass
+                
+        banned = []
+        if os.path.exists(banned_path):
+            try:
+                with open(banned_path, "r", encoding="utf-8") as f:
+                    banned = json.load(f)
+            except Exception:
+                pass
+                
+        return {
+            "whitelist": whitelist,
+            "ops": ops,
+            "banned": banned
+        }
+
+    @classmethod
+    def modify_player_list(cls, server, list_type, action, username, reason="Banned by admin"):
+        """
+        list_type: 'whitelist', 'ops', 'banned'
+        action: 'add', 'remove'
+        """
+        server_path = cls.get_server_path(server)
+        file_map = {
+            "whitelist": "whitelist.json",
+            "ops": "ops.json",
+            "banned": "banned-players.json"
+        }
+        
+        if list_type not in file_map:
+            raise Exception("Invalid list type")
+            
+        file_path = os.path.join(server_path, file_map[list_type])
+        
+        data = []
+        if os.path.exists(file_path):
+            try:
+                with open(file_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except Exception:
+                pass
+                
+        uuid = cls._get_uuid_for_username(username)
+        
+        if action == "add":
+            data = [item for item in data if item.get("name", "").lower() != username.lower()]
+            
+            if list_type == "whitelist":
+                data.append({"uuid": uuid, "name": username})
+                if str(server.id) in cls._processes:
+                    cls.send_command(server, f"whitelist add {username}")
+                    cls.send_command(server, "whitelist reload")
+            elif list_type == "ops":
+                data.append({
+                    "uuid": uuid,
+                    "name": username,
+                    "level": 4,
+                    "bypassesPlayerLimit": False
+                })
+                if str(server.id) in cls._processes:
+                    cls.send_command(server, f"op {username}")
+            elif list_type == "banned":
+                created_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S %z") if datetime.now().tzinfo else datetime.now().strftime("%Y-%m-%d %H:%M:%S +0000")
+                data.append({
+                    "uuid": uuid,
+                    "name": username,
+                    "created": created_str,
+                    "source": "Banned by Admin",
+                    "expires": "forever",
+                    "reason": reason
+                })
+                if str(server.id) in cls._processes:
+                    cls.send_command(server, f"ban {username} {reason}")
+                    
+        elif action == "remove":
+            data = [item for item in data if item.get("name", "").lower() != username.lower()]
+            
+            if list_type == "whitelist":
+                if str(server.id) in cls._processes:
+                    cls.send_command(server, f"whitelist remove {username}")
+                    cls.send_command(server, "whitelist reload")
+            elif list_type == "ops":
+                if str(server.id) in cls._processes:
+                    cls.send_command(server, f"deop {username}")
+            elif list_type == "banned":
+                if str(server.id) in cls._processes:
+                    cls.send_command(server, f"pardon {username}")
+                    
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+            
+        return True
+
+    @classmethod
+    def _get_uuid_for_username(cls, username):
+        from django.contrib.auth import get_user_model
+        User = get_user_model()
+        user = User.objects.filter(username__iexact=username).first()
+        if user and user.minecraft_uuid:
+            return str(user.minecraft_uuid)
+            
+        import hashlib
+        import uuid as uuid_lib
+        hash_bytes = hashlib.md5(f"OfflinePlayer:{username}".encode('utf-8')).digest()
+        hash_bytes = bytearray(hash_bytes)
+        hash_bytes[6] = (hash_bytes[6] & 0x0f) | 0x30
+        hash_bytes[8] = (hash_bytes[8] & 0x3f) | 0x80
+        return str(uuid_lib.UUID(bytes=bytes(hash_bytes)))

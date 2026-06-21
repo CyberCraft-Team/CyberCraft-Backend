@@ -67,6 +67,9 @@ class ServerConsoleConsumer(AsyncWebsocketConsumer):
     async def server_status(self, event):
         await self.send(json.dumps({"type": "status", "status": event["status"]}))
 
+    async def server_stats(self, event):
+        await self.send(json.dumps({"type": "stats", "stats": event["stats"]}))
+
     @database_sync_to_async
     def check_server_access(self, user, server_id):
         from .models import MinecraftServer

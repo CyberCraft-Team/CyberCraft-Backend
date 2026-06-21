@@ -4,6 +4,8 @@ from .views import (
     LauncherServerManifestView,
     LauncherUpdateCheckView,
     LauncherWSTokenView,
+    ModFileDownloadView,
+    ModpackFileDownloadView,
 )
 
 urlpatterns = [
@@ -22,5 +24,15 @@ urlpatterns = [
         "launcher/ws-token/",
         LauncherWSTokenView.as_view(),
         name="launcher-ws-token",
+    ),
+    path(
+        "launcher/download/mod/<int:mod_id>/",
+        ModFileDownloadView.as_view(),
+        name="launcher-download-mod",
+    ),
+    path(
+        "launcher/download/modpack-file/<int:file_id>/",
+        ModpackFileDownloadView.as_view(),
+        name="launcher-download-modpack-file",
     ),
 ]

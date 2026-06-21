@@ -461,6 +461,50 @@ class MinecraftServerFilesView(APIView):
             )
 
 
+class MinecraftServerPlayersView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get_server(self, request, server_id):
+        server = get_object_or_404(MinecraftServer, id=server_id)
+        if server.owner != request.user and not request.user.is_staff:
+            return None
+        return server
+
+    def get(self, request, server_id):
+        server = self.get_server(request, server_id)
+        if not server:
+            return Response({"error": "Ruxsat yo'q"}, status=status.HTTP_403_FORBIDDEN)
+
+        lists = MinecraftServerManager.get_player_lists(server)
+        return Response(lists)
+
+    def post(self, request, server_id):
+        server = self.get_server(request, server_id)
+        if not server:
+            return Response({"error": "Ruxsat yo'q"}, status=status.HTTP_403_FORBIDDEN)
+
+        list_type = request.data.get("list_type")
+        action = request.data.get("action")
+        username = request.data.get("username", "").strip()
+        reason = request.data.get("reason", "Banned by admin")
+
+        if not list_type or not action or not username:
+            return Response(
+                {"error": "list_type, action va username bo'lishi shart"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            MinecraftServerManager.modify_player_list(
+                server, list_type, action, username, reason
+            )
+            return Response({"message": "Muvaffaqiyatli bajarildi"})
+        except Exception as e:
+            return Response(
+                {"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
 class ServerJarListView(APIView):
     permission_classes = [IsAuthenticated]
     parser_classes = [MultiPartParser, FormParser]
