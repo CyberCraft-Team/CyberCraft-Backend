@@ -200,7 +200,7 @@ class LauncherServerManifestView(APIView):
         )
         if (not loader or loader == "vanilla") and detected_loader:
             loader = detected_loader
-        if not loader_version and detected_loader_version:
+        if (not loader_version or loader_version == server.minecraft_version) and detected_loader_version:
             loader_version = detected_loader_version
 
         # Detected qiymatlarni DB ga saqlab qo'yamiz
