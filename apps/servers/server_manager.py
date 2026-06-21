@@ -1002,17 +1002,35 @@ enable-command-block=true
     @classmethod
     def _monitor_loop(cls):
         import psutil
+        from apps.servers.models import MinecraftServer
         
         channel_layer = get_channel_layer()
+        process_caches = {}
+        
         while not cls._is_shutting_down:
             time.sleep(2)
-            for server_id, process in list(cls._processes.items()):
+            
+            # Find all running servers with active PIDs
+            running_servers = MinecraftServer.objects.filter(
+                status=MinecraftServer.Status.RUNNING, 
+                pid__isnull=False
+            )
+            
+            for server in running_servers:
+                server_id = str(server.id)
+                pid = server.pid
+                
                 try:
-                    if process.poll() is not None:
-                        continue
-                    pid = process.pid
-                    proc = psutil.Process(pid)
+                    # Get or create cached Process instance
+                    if server_id not in process_caches or process_caches[server_id].pid != pid:
+                        process_caches[server_id] = psutil.Process(pid)
+                        
+                    proc = process_caches[server_id]
                     
+                    if not proc.is_running():
+                        continue
+                        
+                    # Calculate stats (interval=None is non-blocking and works with cached Process instance)
                     cpu = proc.cpu_percent(interval=None)
                     mem_info = proc.memory_info()
                     memory_mb = mem_info.rss / (1024 * 1024)
@@ -1030,9 +1048,10 @@ enable-command-block=true
                             }
                         )
                 except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                    pass
+                    if server_id in process_caches:
+                        del process_caches[server_id]
                 except Exception as e:
-                    print(f"Error in monitor loop: {e}")
+                    print(f"Error in monitor loop for server {server_id}: {e}")
 
     @classmethod
     def get_player_lists(cls, server):

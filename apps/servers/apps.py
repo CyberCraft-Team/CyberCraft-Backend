@@ -23,4 +23,8 @@ class ServersConfig(AppConfig):
 
             # Backend o'chirilishidan oldin barcha serverlarni to'xtatish
             atexit.register(MinecraftServerManager.stop_all_servers)
+            
+            # Start resource monitoring thread
+            MinecraftServerManager.start_monitoring()
+            
             ServersConfig._atexit_registered = True
