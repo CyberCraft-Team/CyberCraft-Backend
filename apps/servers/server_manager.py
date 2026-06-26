@@ -303,62 +303,69 @@ enable-command-block=true
         server.status = MinecraftServer.Status.INSTALLING
         server.save()
 
-        ServerLog.objects.create(
-            server=server,
-            level="info",
-            message=f"Server install boshlanmoqda: {install_cmd_str}",
-        )
-
-        try:
-            import shlex
-
-            install_cmd = shlex.split(install_cmd_str)
-
-            process = subprocess.Popen(
-                install_cmd,
-                cwd=server_path,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-            )
-
-            for line in iter(process.stdout.readline, ""):
-                if not line:
-                    break
-                line = line.strip()
-                if line:
-                    ServerLog.objects.create(
-                        server=server, level="info", message=f"[INSTALL] {line}"
-                    )
-
-            process.wait()
-
-            if process.returncode == 0:
-                server.is_installed = True
-                server.status = MinecraftServer.Status.STOPPED
-                server.save()
-
+        def run_installation():
+            try:
                 ServerLog.objects.create(
                     server=server,
                     level="info",
-                    message="Server muvaffaqiyatli install qilindi",
-                )
-                return True
-            else:
-                server.status = MinecraftServer.Status.ERROR
-                server.save()
-                raise Exception(
-                    f"Install jarayoni xato bilan tugadi (code: {process.returncode})"
+                    message=f"Server install boshlanmoqda: {install_cmd_str}",
                 )
 
-        except Exception as e:
-            server.status = MinecraftServer.Status.ERROR
-            server.save()
-            ServerLog.objects.create(
-                server=server, level="error", message=f"Install xatosi: {str(e)}"
-            )
-            raise e
+                import shlex
+                install_cmd = shlex.split(install_cmd_str)
+
+                process = subprocess.Popen(
+                    install_cmd,
+                    cwd=server_path,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                )
+
+                for line in iter(process.stdout.readline, ""):
+                    if not line:
+                        break
+                    line = line.strip()
+                    if line:
+                        ServerLog.objects.create(
+                            server=server, level="info", message=f"[INSTALL] {line}"
+                        )
+
+                process.wait()
+
+                server.refresh_from_db()
+                if process.returncode == 0:
+                    server.is_installed = True
+                    server.status = MinecraftServer.Status.STOPPED
+                    server.save()
+
+                    ServerLog.objects.create(
+                        server=server,
+                        level="info",
+                        message="Server muvaffaqiyatli install qilindi",
+                    )
+                else:
+                    server.status = MinecraftServer.Status.ERROR
+                    server.save()
+                    ServerLog.objects.create(
+                        server=server,
+                        level="error",
+                        message=f"Install jarayoni xato bilan tugadi (code: {process.returncode})",
+                    )
+            except Exception as e:
+                try:
+                    server.refresh_from_db()
+                    server.status = MinecraftServer.Status.ERROR
+                    server.save()
+                    ServerLog.objects.create(
+                        server=server, level="error", message=f"Install xatosi: {str(e)}"
+                    )
+                except Exception:
+                    pass
+
+        threading.Thread(target=run_installation, daemon=True).start()
+        return True
 
     @classmethod
     def start_server(cls, server):

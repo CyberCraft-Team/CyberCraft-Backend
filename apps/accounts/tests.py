@@ -84,6 +84,23 @@ class TokenExpiryTest(TestCase):
         token.save()
         self.assertTrue(token.is_expired())
 
+    def test_admin_auth_via_launcher_token(self):
+        from apps.accounts.authentication import AdminTokenAuthentication
+        from rest_framework.exceptions import AuthenticationFailed
+
+        # If user is not staff, it should fail
+        launcher_token = LauncherToken.objects.create(user=self.user)
+        auth = AdminTokenAuthentication()
+        with self.assertRaises(AuthenticationFailed):
+            auth.authenticate_credentials(launcher_token.key)
+
+        # If user is staff, it should succeed
+        self.user.is_staff = True
+        self.user.save()
+        user, token = auth.authenticate_credentials(launcher_token.key)
+        self.assertEqual(user, self.user)
+        self.assertEqual(token, launcher_token)
+
 
 class AuthAPITest(TestCase):
     """Auth API endpoint testlari."""
