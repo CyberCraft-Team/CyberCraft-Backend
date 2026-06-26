@@ -213,7 +213,9 @@ class MinecraftServerDetailView(APIView):
             server = serializer.save()
             if server.status == MinecraftServer.Status.STOPPED:
                 MinecraftServerManager.create_server_properties(server)
-            return Response(MinecraftServerDetailSerializer(server).data)
+            return Response(
+                MinecraftServerDetailSerializer(server, context={"request": request}).data
+            )
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
     def delete(self, request, server_id):
@@ -605,7 +607,11 @@ class ServerTypeConfigListView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        configs = ServerTypeConfig.objects.filter(is_active=True)
+        active_only = request.query_params.get("active_only", "true").lower() == "true"
+        if active_only:
+            configs = ServerTypeConfig.objects.filter(is_active=True)
+        else:
+            configs = ServerTypeConfig.objects.all()
         serializer = ServerTypeConfigSerializer(configs, many=True)
         return Response(serializer.data)
 

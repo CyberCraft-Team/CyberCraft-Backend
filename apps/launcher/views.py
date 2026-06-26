@@ -169,12 +169,13 @@ class LauncherServerManifestView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, server_id):
+        from django.core.exceptions import ValidationError
         try:
             server = MinecraftServer.objects.select_related("server_type").get(
                 id=server_id
             )
             return self._get_managed_server_manifest(request, server)
-        except (MinecraftServer.DoesNotExist, ValueError):
+        except (MinecraftServer.DoesNotExist, ValueError, ValidationError):
             pass
 
         try:

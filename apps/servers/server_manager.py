@@ -189,6 +189,31 @@ class MinecraftServerManager:
             f.writelines(out)
 
     @classmethod
+    def _patch_script_content(cls, content, agent_arg):
+        cleaned_content = re.sub(r"-javaagent:[^\s]*authlib-injector[^\s]*", "", content)
+        lines = cleaned_content.splitlines()
+        new_lines = []
+        for line in lines:
+            stripped = line.strip().lower()
+            if (
+                not stripped 
+                or stripped.startswith("#") 
+                or stripped.startswith("rem") 
+                or stripped.startswith("echo")
+                or stripped.startswith("set ")
+                or ("=" in stripped.split()[0] if stripped.split() else False)
+            ):
+                new_lines.append(line)
+                continue
+            
+            match = re.search(r"^(\s*(?:exec\s+|start\s+|@\s*)?)(\bjava\b)", line, flags=re.IGNORECASE)
+            if match:
+                prefix = match.group(1)
+                line = line[:match.start()] + prefix + f"java {agent_arg}" + line[match.end():]
+            new_lines.append(line)
+        return "\n".join(new_lines)
+
+    @classmethod
     def setup_server_from_zip(cls, server, zip_file):
         if not zip_file:
             raise Exception("ZIP fayl topilmadi")
@@ -209,11 +234,12 @@ class MinecraftServerManager:
                     raise Exception(
                         f"ZIP buzilgan yoki noto'g'ri (fayl: {corrupt}). Qayta yuklang."
                     )
+                server_path_abs = os.path.abspath(server_path)
                 for member in archive.infolist():
                     member_path = os.path.abspath(
-                        os.path.normpath(os.path.join(server_path, member.filename))
+                        os.path.normpath(os.path.join(server_path_abs, member.filename))
                     )
-                    if not member_path.startswith(os.path.abspath(server_path)):
+                    if os.path.commonpath([server_path_abs, member_path]) != server_path_abs:
                         raise Exception("ZIP ichida xavfli fayl yo'li aniqlandi")
 
                 archive.extractall(server_path)
@@ -488,8 +514,7 @@ enable-command-block=true
             try:
                 with open(run_bat_path, "r", encoding="utf-8") as f:
                     content = f.read()
-                cleaned_content = re.sub(r"-javaagent:[^\s]*authlib-injector[^\s]*", "", content)
-                new_content = re.sub(r"\bjava\b", f"java {agent_arg}", cleaned_content, flags=re.IGNORECASE)
+                new_content = cls._patch_script_content(content, agent_arg)
                 if new_content != content:
                     with open(run_bat_path, "w", encoding="utf-8") as f:
                         f.write(new_content)
@@ -501,8 +526,7 @@ enable-command-block=true
             try:
                 with open(run_sh_path, "r", encoding="utf-8") as f:
                     content = f.read()
-                cleaned_content = re.sub(r"-javaagent:[^\s]*authlib-injector[^\s]*", "", content)
-                new_content = re.sub(r"\bjava\b", f"java {agent_arg}", cleaned_content, flags=re.IGNORECASE)
+                new_content = cls._patch_script_content(content, agent_arg)
                 if new_content != content:
                     with open(run_sh_path, "w", encoding="utf-8") as f:
                         f.write(new_content)
@@ -788,12 +812,24 @@ enable-command-block=true
             except Exception:
                 pass
         
-        time.sleep(2)
+        # Wait up to 15 seconds for processes to exit gracefully
+        start_wait = time.time()
+        while time.time() - start_wait < 15:
+            all_stopped = True
+            for process in processes:
+                if process.poll() is None:
+                    all_stopped = False
+                    break
+            if all_stopped:
+                break
+            time.sleep(0.5)
+            
         for process in processes:
-            try:
-                process.kill()
-            except Exception:
-                pass
+            if process.poll() is None:
+                try:
+                    process.kill()
+                except Exception:
+                    pass
 
     @classmethod
     def restart_server(cls, server):
@@ -910,7 +946,8 @@ enable-command-block=true
         mods_path = os.path.join(server_path, "mods")
         os.makedirs(mods_path, exist_ok=True)
 
-        dest_path = os.path.join(mods_path, mod_file.name)
+        safe_filename = os.path.basename(mod_file.name)
+        dest_path = os.path.join(mods_path, safe_filename)
         with open(dest_path, "wb") as f:
             for chunk in mod_file.chunks():
                 f.write(chunk)
@@ -948,7 +985,15 @@ enable-command-block=true
     @classmethod
     def get_server_files(cls, server, path=""):
         server_path = cls.get_server_path(server)
-        target_path = os.path.join(server_path, path) if path else server_path
+        server_path_abs = os.path.abspath(server_path)
+        
+        if path:
+            target_path = os.path.abspath(os.path.normpath(os.path.join(server_path_abs, path)))
+        else:
+            target_path = server_path_abs
+
+        if os.path.commonpath([server_path_abs, target_path]) != server_path_abs:
+            raise Exception("Noto'g'ri fayl yo'li")
 
         if not os.path.exists(target_path):
             return []
@@ -975,29 +1020,58 @@ enable-command-block=true
     @classmethod
     def read_file(cls, server, file_path):
         server_path = cls.get_server_path(server)
-        full_path = os.path.join(server_path, file_path)
+        server_path_abs = os.path.abspath(server_path)
+        full_path = os.path.abspath(os.path.normpath(os.path.join(server_path_abs, file_path)))
 
-        if not full_path.startswith(server_path):
+        if os.path.commonpath([server_path_abs, full_path]) != server_path_abs:
             raise Exception("Noto'g'ri fayl yo'li")
 
         if not os.path.exists(full_path):
             raise Exception("Fayl topilmadi")
 
-        with open(full_path, "r") as f:
+        with open(full_path, "r", encoding="utf-8", errors="replace") as f:
             return f.read()
 
     @classmethod
     def write_file(cls, server, file_path, content):
         server_path = cls.get_server_path(server)
-        full_path = os.path.join(server_path, file_path)
+        server_path_abs = os.path.abspath(server_path)
+        full_path = os.path.abspath(os.path.normpath(os.path.join(server_path_abs, file_path)))
 
-        if not full_path.startswith(server_path):
+        if os.path.commonpath([server_path_abs, full_path]) != server_path_abs:
             raise Exception("Noto'g'ri fayl yo'li")
 
-        with open(full_path, "w") as f:
+        os.makedirs(os.path.dirname(full_path), exist_ok=True)
+
+        with open(full_path, "w", encoding="utf-8") as f:
             f.write(content)
 
         return True
+
+    @classmethod
+    def _is_server_process(cls, server_id, pid, proc):
+        popen_proc = cls._processes.get(server_id)
+        if popen_proc:
+            return popen_proc.pid == pid and popen_proc.poll() is None
+        try:
+            from apps.servers.models import MinecraftServer
+            server = MinecraftServer.objects.filter(id=server_id).first()
+            if not server:
+                return False
+            server_path = os.path.abspath(cls.get_server_path(server))
+            try:
+                proc_cwd = os.path.abspath(proc.cwd())
+                if os.path.commonpath([server_path, proc_cwd]) == server_path:
+                    return True
+            except Exception:
+                pass
+            cmdline = proc.cmdline()
+            cmdline_str = " ".join(cmdline).lower()
+            if "java" in cmdline_str and (str(server_id) in cmdline_str or "authlib-injector" in cmdline_str or "server.jar" in cmdline_str):
+                return True
+        except Exception:
+            pass
+        return False
 
     @classmethod
     def start_monitoring(cls):
@@ -1034,7 +1108,7 @@ enable-command-block=true
                         
                     proc = process_caches[server_id]
                     
-                    if not proc.is_running():
+                    if not proc.is_running() or not cls._is_server_process(server_id, pid, proc):
                         continue
                         
                     # Calculate stats (interval=None is non-blocking and works with cached Process instance)
