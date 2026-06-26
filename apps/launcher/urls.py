@@ -6,9 +6,11 @@ from .views import (
     LauncherWSTokenView,
     ModFileDownloadView,
     ModpackFileDownloadView,
+    LauncherDownloadsView,
 )
 
 urlpatterns = [
+    path("launcher/downloads/", LauncherDownloadsView.as_view(), name="launcher-downloads"),
     path("launcher/servers/", LauncherServersView.as_view(), name="launcher-servers"),
     path(
         "launcher/servers/<str:server_id>/manifest/",

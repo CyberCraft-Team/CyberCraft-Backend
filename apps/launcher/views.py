@@ -487,3 +487,35 @@ class ModpackFileDownloadView(APIView):
         response["Content-Disposition"] = f'attachment; filename="{file_name}"'
         response["Content-Length"] = os.path.getsize(file_path)
         return response
+
+
+class LauncherDownloadsView(APIView):
+    """Barcha platformalar uchun launcher yuklab olish havolalarini olish"""
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        from .models import LauncherVersion
+        downloads = {}
+        for platform in ["win32", "darwin", "linux"]:
+            latest = (
+                LauncherVersion.objects.filter(platform=platform, is_active=True)
+                .order_by("-created_at")
+                .first()
+            )
+            if latest:
+                download_url = request.build_absolute_uri(latest.download_file.url)
+                if not request.get_host().startswith("localhost") and not request.get_host().startswith("127.0.0.1"):
+                    if download_url.startswith("http://"):
+                        download_url = "https://" + download_url[7:]
+                downloads[platform] = {
+                    "version": latest.version,
+                    "download_url": download_url,
+                    "file_size": latest.file_size,
+                    "release_notes": latest.release_notes,
+                    "created_at": latest.created_at.isoformat(),
+                }
+            else:
+                downloads[platform] = None
+        return Response(downloads)
+
