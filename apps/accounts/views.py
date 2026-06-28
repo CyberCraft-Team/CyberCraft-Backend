@@ -1096,9 +1096,25 @@ class TelegramLoginView(APIView):
     permission_classes = [AllowAny]
 
     def post(self, request):
-        auth_data = request.data
-        check_hash = auth_data.get("hash")
+        data = request.data
+        
+        # Support both wrapped and direct payloads for backward compatibility
+        if "auth_data" in data:
+            auth_data = data.get("auth_data")
+            chosen_username = data.get("username")
+            use_needs_username_flow = True
+        else:
+            auth_data = data
+            chosen_username = None
+            use_needs_username_flow = False
 
+        if not auth_data:
+            return Response(
+                {"error": "Telegram ma'lumotlari talab qilinadi"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        check_hash = auth_data.get("hash")
         if not check_hash:
             return Response(
                 {"error": "Telegram hash talab qilinadi"},
@@ -1121,7 +1137,6 @@ class TelegramLoginView(APIView):
             )
 
         telegram_id = auth_data.get("id")
-        username = auth_data.get("username")
         first_name = auth_data.get("first_name", "")
         last_name = auth_data.get("last_name", "")
 
@@ -1130,19 +1145,76 @@ class TelegramLoginView(APIView):
         is_new_user = False
 
         if not user:
-            # Agar username bo'lmasa, ID dan foydalanamiz
-            if not username:
-                username = f"tg_{telegram_id}"
-            
-            # Username band bo'lsa tasodifiy raqam qo'shish
-            base_username = username
-            counter = 1
-            while User.objects.filter(username=username).exists():
-                username = f"{base_username}{counter}"
-                counter += 1
+            if not use_needs_username_flow:
+                # Old auto-generation flow
+                telegram_username = auth_data.get("username")
+                if not telegram_username:
+                    username_to_use = f"tg_{telegram_id}"
+                else:
+                    username_to_use = telegram_username
+                
+                # Check for valid characters and length for old flow just in case
+                import re
+                username_to_use = re.sub(r'[^a-zA-Z0-9_]', '_', username_to_use)
+                if len(username_to_use) < 3:
+                    username_to_use = f"tg_{telegram_id}"
+                elif len(username_to_use) > 16:
+                    username_to_use = username_to_use[:16]
+
+                base_username = username_to_use
+                counter = 1
+                while User.objects.filter(username=username_to_use).exists():
+                    username_to_use = f"{base_username}{counter}"
+                    if len(username_to_use) > 16:
+                        username_to_use = f"{base_username[:10]}{counter}"
+                    counter += 1
+            else:
+                # New username prompt flow
+                if not chosen_username:
+                    return Response(
+                        {
+                            "needs_username": True,
+                            "is_new_user": True
+                        },
+                        status=status.HTTP_200_OK
+                    )
+                
+                chosen_username = chosen_username.strip()
+                if not chosen_username:
+                    return Response(
+                        {"error": "Username kiritilishi shart"},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+
+                if len(chosen_username) < 3:
+                    return Response(
+                        {"error": "Username kamida 3 ta belgi bo'lishi kerak"},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+
+                if len(chosen_username) > 16:
+                    return Response(
+                        {"error": "Username 16 ta belgidan oshmasligi kerak"},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+
+                import re
+                if not re.match(r'^[a-zA-Z0-9_]+$', chosen_username):
+                    return Response(
+                        {"error": "Username faqat harflar, raqamlar va pastki chiziqdan (_) iborat bo'lishi kerak"},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+
+                if User.objects.filter(username__iexact=chosen_username).exists():
+                    return Response(
+                        {"error": "Bu username allaqachon mavjud"},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+                
+                username_to_use = chosen_username
 
             user = User.objects.create_user(
-                username=username,
+                username=username_to_use,
                 first_name=first_name,
                 last_name=last_name,
                 telegram_id=telegram_id
