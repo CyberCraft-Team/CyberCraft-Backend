@@ -1,0 +1,68 @@
+name: CI
+
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: cybercraft
+          POSTGRES_PASSWORD: cybercraft
+          POSTGRES_DB: cybercraft_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      SECRET_KEY: ci-only-not-a-real-secret
+      DEBUG: "False"
+      ALLOWED_HOSTS: localhost,127.0.0.1
+      DATABASE_URL: postgres://cybercraft:cybercraft@localhost:5432/cybercraft_test
+      REDIS_URL: redis://localhost:6379/0
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+
+      # Plain check, not check --deploy. The settings.py / settings_prod.py
+      # star-import cycle means DEBUG, SECURE_* and the database config do not
+      # behave as configured, so --deploy would fail for reasons P1 exists to
+      # fix. Re-enable --deploy at the end of P1.
+      - name: Django system checks
+        run: python manage.py check
+
+      - name: Detect missing migrations
+        run: python manage.py makemigrations --check --dry-run
+
+      - name: Tests
+        run: python manage.py test
+
+      # Non-blocking: this code has never been linted. P1 tightens it.
+      - name: Lint
+        run: ruff check .
+        continue-on-error: true
