@@ -1,0 +1,51 @@
+# Infrastructure only: PostgreSQL and Redis.
+#
+# Django itself runs on the host under systemd, not in a container, because
+# it spawns Minecraft servers as child processes. Containerising that would
+# mean baking a JVM into the image and bind-mounting the whole servers/
+# tree, and P3 moves server supervision into its own host process anyway.
+#
+#   docker compose -f deploy/docker-compose.yml up -d
+
+name: cybercraft
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME:-cybercraft}
+      POSTGRES_USER: ${DB_USER:-cybercraft}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be set}
+    # Bound to loopback: Django runs on the host, nothing external needs this.
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-cybercraft}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: >-
+      redis-server
+      --appendonly yes
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
+  redis_data:
