@@ -25,6 +25,7 @@ from .serializers import (
     UserRegisterSerializer,
 )
 from .authentication import AdminTokenAuthentication
+from .permissions import IsTrustedMod
 from google.oauth2 import id_token
 from google.auth.transport import requests
 
@@ -608,30 +609,6 @@ class AdminUserSuperuserView(APIView):
         })
 
 
-@api_view(["POST"])
-@permission_classes([AllowAny])
-def minecraft_auth(request):
-    username = request.data.get("username")
-    uuid = request.data.get("uuid")
-
-    if not username or not uuid:
-        return Response(status=400)
-
-    user = User.objects.filter(username=username).first()
-
-    if not user:
-        return Response(status=403)
-
-    if user.minecraft_uuid != uuid:
-        user.minecraft_uuid = uuid
-        user.save(update_fields=["minecraft_uuid"])
-
-    if not user.is_whitelisted:
-        return Response(status=403)
-
-    return Response(status=200)
-
-
 class MinecraftSessionCreateView(APIView):
     """Launcher serverga ulanishdan oldin session yaratadi.
 
@@ -697,7 +674,7 @@ class MinecraftVerifyView(APIView):
     player kirishga ruxsat beriladi.
     """
 
-    permission_classes = [AllowAny]
+    permission_classes = [IsTrustedMod]
     authentication_classes = []
 
     def post(self, request):

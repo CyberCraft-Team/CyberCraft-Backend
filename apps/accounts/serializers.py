@@ -183,26 +183,14 @@ class UserRegisterSerializer(serializers.ModelSerializer):
         from .utils import process_and_save_skin
         process_and_save_skin(user, skin_file)
 
-        if referrer:
-            from apps.rewards.models import CCTransaction
-
-            referrer.cc_balance += 10
-            referrer.save(update_fields=["cc_balance"])
-            CCTransaction.objects.create(
-                user=referrer,
-                amount=10,
-                transaction_type="referral_inviter",
-                description=f"{user.username} ro'yxatdan o'tdi",
-            )
-
-            user.cc_balance += 5
-            user.save(update_fields=["cc_balance"])
-            CCTransaction.objects.create(
-                user=user,
-                amount=5,
-                transaction_type="referral_invitee",
-                description=f"{referrer.username} tomonidan taklif qilindi",
-            )
+        # The referral bonus is awarded by the on_referral_bonus post_save
+        # receiver in signals.py, which fired during user.save() above --
+        # referred_by was already set at that point. Awarding it here too is
+        # what gave the inviter 20 CC instead of 10 and wrote four
+        # CCTransaction rows per signup. The signal is the single place: it
+        # covers the Google and Telegram registration paths as well, which
+        # never went through this serializer.
+        user.refresh_from_db(fields=["cc_balance"])
 
         return user
 

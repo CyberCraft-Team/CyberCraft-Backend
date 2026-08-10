@@ -34,6 +34,7 @@ env = environ.Env(
     SITE_URL=(str, "http://localhost:3000"),
     GOOGLE_CLIENT_ID=(str, ""),
     TELEGRAM_BOT_TOKEN=(str, ""),
+    MOD_API_KEY=(str, ""),
     REDIS_URL=(str, ""),
     DB_NAME=(str, ""),
     DB_USER=(str, ""),
@@ -202,6 +203,10 @@ DEFAULT_FROM_EMAIL = env("DEFAULT_FROM_EMAIL")
 SITE_URL = env("SITE_URL")
 GOOGLE_CLIENT_ID = env("GOOGLE_CLIENT_ID") or None
 TELEGRAM_BOT_TOKEN = env("TELEGRAM_BOT_TOKEN") or None
+
+# Shared secret presented by cybercraftauth and cybercraftranks in the
+# X-CyberCraft-Key header. Required in production; see apps/accounts/permissions.py.
+MOD_API_KEY = env("MOD_API_KEY")
 
 LOG_DIR = BASE_DIR / "logs"
 

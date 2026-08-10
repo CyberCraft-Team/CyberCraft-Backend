@@ -240,6 +240,101 @@ class AuthAPITest(TestCase):
         self.assertEqual(response.status_code, 200)
 
 
+class ReferralBonusTest(TestCase):
+    """The bonus used to be awarded twice: once in UserRegisterSerializer
+    and once again by the on_referral_bonus post_save receiver, which the
+    serializer's own user.save() had already fired."""
+
+    def setUp(self):
+        self.inviter = User.objects.create_user(
+            username="inviter", password="pass12345"
+        )
+
+    def test_bonus_is_awarded_exactly_once(self):
+        invitee = User.objects.create_user(
+            username="invitee", password="pass12345", referred_by=self.inviter
+        )
+
+        self.inviter.refresh_from_db()
+        invitee.refresh_from_db()
+
+        self.assertEqual(self.inviter.cc_balance, 10)
+        self.assertEqual(invitee.cc_balance, 5)
+
+    def test_one_transaction_row_per_side(self):
+        invitee = User.objects.create_user(
+            username="invitee2", password="pass12345", referred_by=self.inviter
+        )
+
+        self.assertEqual(
+            CCTransaction.objects.filter(
+                user=self.inviter, transaction_type="referral_inviter"
+            ).count(),
+            1,
+        )
+        self.assertEqual(
+            CCTransaction.objects.filter(
+                user=invitee, transaction_type="referral_invitee"
+            ).count(),
+            1,
+        )
+
+    def test_no_bonus_without_a_referrer(self):
+        user = User.objects.create_user(username="solo", password="pass12345")
+        self.assertEqual(user.cc_balance, 0)
+        self.assertEqual(CCTransaction.objects.filter(user=user).count(), 0)
+
+
+@override_settings(MOD_API_KEY="test-mod-key", DEBUG=False)
+class ModApiKeyTest(TestCase):
+    """/minecraft/verify/ decides who may join a game server. Before P2 it
+    accepted any caller that could reach the backend."""
+
+    ENDPOINTS = [
+        ("post", "/api/v1/minecraft/verify/"),
+        ("get", "/api/v1/rewards/player-rank/?username=someone"),
+    ]
+
+    def setUp(self):
+        self.client = APIClient()
+
+    def test_rejected_without_the_header(self):
+        for method, url in self.ENDPOINTS:
+            with self.subTest(url=url):
+                response = getattr(self.client, method)(url)
+                self.assertEqual(response.status_code, 403)
+
+    def test_rejected_with_a_wrong_key(self):
+        for method, url in self.ENDPOINTS:
+            with self.subTest(url=url):
+                response = getattr(self.client, method)(
+                    url, HTTP_X_CYBERCRAFT_KEY="wrong-key"
+                )
+                self.assertEqual(response.status_code, 403)
+
+    def test_accepted_with_the_right_key(self):
+        """A correct key gets past the permission layer. The view may still
+        answer 403 on its own merits -- an unknown player has no session --
+        so this asserts the request was let through, not that it succeeded."""
+        response = self.client.get(
+            "/api/v1/rewards/player-rank/?username=nobody",
+            HTTP_X_CYBERCRAFT_KEY="test-mod-key",
+        )
+        self.assertIn(response.status_code, (200, 404))
+
+    @override_settings(MOD_API_KEY="", DEBUG=True)
+    def test_open_in_development_when_no_key_is_configured(self):
+        """A fresh checkout must still run. prod.py refuses to start with an
+        empty MOD_API_KEY, so this cannot reach production."""
+        response = self.client.get("/api/v1/rewards/player-rank/?username=nobody")
+        self.assertNotEqual(response.status_code, 403)
+
+    @override_settings(MOD_API_KEY="", DEBUG=False)
+    def test_closed_when_no_key_and_not_debug(self):
+        response = self.client.get("/api/v1/rewards/player-rank/?username=nobody")
+        self.assertEqual(response.status_code, 403)
+
+
 class HealthCheckTest(TestCase):
     """Health check endpoint testi."""
 

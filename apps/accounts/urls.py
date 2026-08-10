@@ -17,7 +17,6 @@ from .views import (
     PlayerSkinView,
     SkinUploadView,
     CapeUploadView,
-    minecraft_auth,
     MinecraftVerifyView,
     MinecraftSessionCreateView,
     SendVerificationEmailView,
@@ -63,7 +62,6 @@ urlpatterns = [
     path("admin/users/<int:pk>/staff/", AdminUserStaffView.as_view(), name="admin-user-staff"),
     path("admin/users/<int:pk>/ban/", AdminUserBanView.as_view(), name="admin-user-ban"),
     path("admin/users/<int:pk>/superuser/", AdminUserSuperuserView.as_view(), name="admin-user-superuser"),
-    path("minecraft/auth/", minecraft_auth, name="minecraft-auth"),
     path("minecraft/verify/", MinecraftVerifyView.as_view(), name="minecraft-verify"),
     path(
         "minecraft/session/create/",

@@ -63,6 +63,12 @@ if not _redis_url:
 
 CACHES, CHANNEL_LAYERS = redis_backed(_redis_url)
 
+if not MOD_API_KEY:  # noqa: F405
+    raise ImproperlyConfigured(
+        "MOD_API_KEY is required in production: /minecraft/verify/ decides who "
+        "may join a game server, and it would otherwise accept any caller."
+    )
+
 # ---------------------------------------------------------------------------
 # Security
 #
