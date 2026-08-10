@@ -26,6 +26,8 @@ from .serializers import (
 )
 from .authentication import AdminTokenAuthentication
 from .permissions import IsTrustedMod
+from apps.auditlog.models import AuditLog
+from apps.auditlog.utils import client_ip, record, record_flag_change
 from google.oauth2 import id_token
 from google.auth.transport import requests
 
@@ -401,6 +403,12 @@ class AdminLoginView(APIView):
 
         logger.info(f"Admin muvaffaqiyatli kirdi: username={username}")
         token = AuthToken.issue(user, AuthToken.Scope.ADMIN)
+        AuditLog.log(
+            user=user,
+            action="login",
+            description=f"Admin panelga kirdi: {username}",
+            ip_address=client_ip(request),
+        )
 
         return Response(
             {
@@ -465,6 +473,7 @@ class AdminUserWhitelistView(APIView):
 
         user.is_whitelisted = bool(value)
         user.save(update_fields=["is_whitelisted"])
+        record_flag_change(request, user, "is_whitelisted", user.is_whitelisted)
         logger.info(f"Admin {request.user.username}: user {user.username} whitelist={user.is_whitelisted}")
         return Response({"is_whitelisted": user.is_whitelisted, "message": "Muvaffaqiyatli saqlandi"})
 
@@ -486,6 +495,7 @@ class AdminUserOperatorView(APIView):
 
         user.is_operator = bool(value)
         user.save(update_fields=["is_operator"])
+        record_flag_change(request, user, "is_operator", user.is_operator)
         logger.info(f"Admin {request.user.username}: user {user.username} operator={user.is_operator}")
         return Response({"is_operator": user.is_operator, "message": "Muvaffaqiyatli saqlandi"})
 
@@ -515,6 +525,7 @@ class AdminUserStaffView(APIView):
 
         user.is_staff = bool(value)
         user.save(update_fields=["is_staff"])
+        record_flag_change(request, user, "is_staff", user.is_staff)
         logger.info(f"Admin {request.user.username}: user {user.username} staff={user.is_staff}")
         return Response({"is_staff": user.is_staff, "message": "Muvaffaqiyatli saqlandi"})
 
@@ -542,6 +553,8 @@ class AdminUserBanView(APIView):
             user.banned_until = None
             user.is_active = True
             user.save(update_fields=["is_banned", "ban_reason", "banned_until", "is_active"])
+            record(request, "unban", target=user,
+                   description=f"{user.username} ban dan chiqarildi")
             logger.info(f"Admin {request.user.username}: user {user.username} UNBAN qilindi")
             return Response({"is_banned": False, "message": f"{user.username} ban dan chiqarildi"})
         else:
@@ -558,6 +571,9 @@ class AdminUserBanView(APIView):
             else:
                 user.banned_until = None  # Doimiy ban
             user.save(update_fields=["is_banned", "ban_reason", "banned_until", "is_active"])
+            record(request, "ban", target=user,
+                   description=f"{user.username} ban qilindi. Sabab: {reason}",
+                   changes={"reason": reason, "banned_until": banned_until})
             logger.info(f"Admin {request.user.username}: user {user.username} BAN qilindi. Sabab: {reason}")
             return Response({"is_banned": True, "message": f"{user.username} ban qilindi"})
 
@@ -601,6 +617,7 @@ class AdminUserSuperuserView(APIView):
             user.save(update_fields=["is_superuser"])
 
         action_str = "SUPERUSER qilindi" if user.is_superuser else "Superuserlikdan chiqarildi"
+        record_flag_change(request, user, "is_superuser", user.is_superuser)
         logger.info(f"Admin {request.user.username}: user {user.username} {action_str}")
         return Response({
             "is_superuser": user.is_superuser,
