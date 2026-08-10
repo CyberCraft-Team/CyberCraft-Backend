@@ -17,9 +17,8 @@ import logging
 import hmac
 import hashlib
 import time
-from apps.launcher.models import LauncherToken
 from apps.launcher.authentication import LauncherTokenAuthentication
-from .models import AdminToken, User
+from .models import AuthToken, User
 from .serializers import (
     UserMinimalSerializer,
     AdminUserSerializer,
@@ -174,8 +173,8 @@ class LauncherLoginView(APIView):
             )
 
         # Faqat eskirgan (expired) tokenlarni o'chirish va yangi yaratish
-        LauncherToken.objects.filter(user=user, expires_at__lt=timezone.now()).delete()
-        token = LauncherToken.objects.create(user=user)
+        AuthToken.objects.filter(user=user, scope=AuthToken.Scope.LAUNCHER).expired().delete()
+        token = AuthToken.issue(user, AuthToken.Scope.LAUNCHER)
 
         return Response(
             {
@@ -190,7 +189,7 @@ class LauncherLogoutView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        LauncherToken.objects.filter(user=request.user).delete()
+        AuthToken.objects.filter(user=request.user, scope=AuthToken.Scope.LAUNCHER).delete()
         return Response({"message": "Muvaffaqiyatli chiqildi"})
 
 
@@ -400,8 +399,7 @@ class AdminLoginView(APIView):
             )
 
         logger.info(f"Admin muvaffaqiyatli kirdi: username={username}")
-        AdminToken.objects.filter(user=user).delete()
-        token = AdminToken.objects.create(user=user)
+        token = AuthToken.issue(user, AuthToken.Scope.ADMIN)
 
         return Response(
             {
@@ -416,7 +414,7 @@ class AdminLogoutView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        AdminToken.objects.filter(user=request.user).delete()
+        AuthToken.objects.filter(user=request.user, scope=AuthToken.Scope.ADMIN).delete()
         return Response({"message": "Muvaffaqiyatli chiqildi"})
 
 
@@ -1067,8 +1065,8 @@ class GoogleLoginView(APIView):
                 )
 
             # LauncherToken yaratish (vebsayt va launcher uchun, faqat eskirganlarini o'chirish)
-            LauncherToken.objects.filter(user=user, expires_at__lt=timezone.now()).delete()
-            token = LauncherToken.objects.create(user=user)
+            AuthToken.objects.filter(user=user, scope=AuthToken.Scope.LAUNCHER).expired().delete()
+            token = AuthToken.issue(user, AuthToken.Scope.LAUNCHER)
             logger.info(f"Token yaratildi: {user.username}")
 
             return Response(
@@ -1227,8 +1225,8 @@ class TelegramLoginView(APIView):
             assign_random_skin(user)
 
         # Token yaratish (faqat eskirganlarini o'chirish)
-        LauncherToken.objects.filter(user=user, expires_at__lt=timezone.now()).delete()
-        token = LauncherToken.objects.create(user=user)
+        AuthToken.objects.filter(user=user, scope=AuthToken.Scope.LAUNCHER).expired().delete()
+        token = AuthToken.issue(user, AuthToken.Scope.LAUNCHER)
 
         return Response({
             "token": token.key,

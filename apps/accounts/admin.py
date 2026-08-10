@@ -1,6 +1,6 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin
-from .models import User, AdminToken
+from .models import User, AuthToken
 
 
 @admin.register(User)
@@ -33,8 +33,13 @@ class CustomUserAdmin(UserAdmin):
     )
 
 
-@admin.register(AdminToken)
-class AdminTokenAdmin(admin.ModelAdmin):
-    list_display = ["key", "user", "created_at"]
-    search_fields = ["user__username"]
-    readonly_fields = ["key", "created_at"]
+@admin.register(AuthToken)
+class AuthTokenAdmin(admin.ModelAdmin):
+    list_display = ["key_short", "user", "scope", "created_at", "expires_at", "last_used_at"]
+    list_filter = ["scope"]
+    search_fields = ["user__username", "key"]
+    readonly_fields = ["key", "created_at", "last_used_at"]
+
+    @admin.display(description="Token")
+    def key_short(self, obj):
+        return f"{obj.key[:16]}…"

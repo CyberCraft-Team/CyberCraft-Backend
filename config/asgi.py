@@ -33,23 +33,26 @@ class TokenAuthMiddleware(BaseMiddleware):
     @database_sync_to_async
     def get_user_from_token(self, token_key):
         from django.contrib.auth.models import AnonymousUser
-        from apps.launcher.models import LauncherToken
-        from apps.accounts.models import AdminToken
+        from apps.accounts.models import AuthToken
 
         # 1. Launcher tokenni tekshiramiz
         try:
-            token = LauncherToken.objects.select_related("user").get(key=token_key)
+            token = AuthToken.objects.select_related("user").get(
+                key=token_key, scope=AuthToken.Scope.LAUNCHER
+            )
             if not token.is_expired():
                 return token.user
-        except LauncherToken.DoesNotExist:
+        except AuthToken.DoesNotExist:
             pass
 
         # 2. Admin tokenni tekshiramiz (web dashboard uchun)
         try:
-            token = AdminToken.objects.select_related("user").get(key=token_key)
+            token = AuthToken.objects.select_related("user").get(
+                key=token_key, scope=AuthToken.Scope.ADMIN
+            )
             if not token.is_expired():
                 return token.user
-        except AdminToken.DoesNotExist:
+        except AuthToken.DoesNotExist:
             pass
 
         return AnonymousUser()

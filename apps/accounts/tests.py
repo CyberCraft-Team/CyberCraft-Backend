@@ -6,15 +6,15 @@ Run: python manage.py test apps.accounts.tests
 from django.test import TestCase, override_settings
 from django.utils import timezone
 from datetime import timedelta
+from rest_framework.exceptions import AuthenticationFailed
 from rest_framework.test import APIClient
 
 from apps.accounts.models import (
     User,
-    AdminToken,
+    AuthToken,
     EmailVerificationToken,
     PasswordResetToken,
 )
-from apps.launcher.models import LauncherToken
 from apps.notifications.models import Notification
 from apps.rewards.models import DailyBonus, CCTransaction
 
@@ -55,7 +55,7 @@ class TokenExpiryTest(TestCase):
         self.user = User.objects.create_user(username="tokenuser", password="pass123")
 
     def test_admin_token_expiry(self):
-        token = AdminToken.objects.create(user=self.user)
+        token = AuthToken.issue(self.user, AuthToken.Scope.ADMIN)
         self.assertFalse(token.is_expired())
 
         token.expires_at = timezone.now() - timedelta(hours=1)
@@ -63,12 +63,39 @@ class TokenExpiryTest(TestCase):
         self.assertTrue(token.is_expired())
 
     def test_launcher_token_expiry(self):
-        token = LauncherToken.objects.create(user=self.user)
+        token = AuthToken.issue(self.user, AuthToken.Scope.LAUNCHER)
         self.assertFalse(token.is_expired())
 
         token.expires_at = timezone.now() - timedelta(days=1)
         token.save()
         self.assertTrue(token.is_expired())
+
+    def test_scope_lifetimes_differ(self):
+        launcher = AuthToken.issue(self.user, AuthToken.Scope.LAUNCHER)
+        admin = AuthToken.issue(self.user, AuthToken.Scope.ADMIN)
+        ws = AuthToken.issue(self.user, AuthToken.Scope.WEBSOCKET)
+
+        self.assertGreater(launcher.expires_at, admin.expires_at)
+        self.assertGreater(admin.expires_at, ws.expires_at)
+
+    def test_issuing_admin_token_revokes_the_previous_one(self):
+        first = AuthToken.issue(self.user, AuthToken.Scope.ADMIN)
+        second = AuthToken.issue(self.user, AuthToken.Scope.ADMIN)
+
+        self.assertFalse(AuthToken.objects.filter(key=first.key).exists())
+        self.assertTrue(AuthToken.objects.filter(key=second.key).exists())
+
+    def test_launcher_tokens_accumulate(self):
+        """Several devices may hold a launcher session at once."""
+        AuthToken.issue(self.user, AuthToken.Scope.LAUNCHER)
+        AuthToken.issue(self.user, AuthToken.Scope.LAUNCHER)
+
+        self.assertEqual(
+            AuthToken.objects.filter(
+                user=self.user, scope=AuthToken.Scope.LAUNCHER
+            ).count(),
+            2,
+        )
 
     def test_email_verification_token(self):
         token = EmailVerificationToken.objects.create(user=self.user)
@@ -84,22 +111,57 @@ class TokenExpiryTest(TestCase):
         token.save()
         self.assertTrue(token.is_expired())
 
-    def test_admin_auth_via_launcher_token(self):
+    def test_launcher_token_is_rejected_for_admin_scope(self):
+        """Regression guard for the fallback removed in P2.
+
+        AdminTokenAuthentication used to fall back to LauncherToken and
+        accept it whenever the user was staff, so a 30-day player token
+        doubled as an admin credential and the 24-hour admin session
+        boundary meant nothing. A staff user must still be rejected here.
+        """
+        from rest_framework.test import APIRequestFactory
+
         from apps.accounts.authentication import AdminTokenAuthentication
-        from rest_framework.exceptions import AuthenticationFailed
 
-        # If user is not staff, it should fail
-        launcher_token = LauncherToken.objects.create(user=self.user)
-        auth = AdminTokenAuthentication()
+        self.user.is_staff = True
+        self.user.is_superuser = True
+        self.user.save()
+
+        launcher_token = AuthToken.issue(self.user, AuthToken.Scope.LAUNCHER)
+
+        request = APIRequestFactory().get(
+            "/", HTTP_AUTHORIZATION=f"Token {launcher_token.key}"
+        )
         with self.assertRaises(AuthenticationFailed):
-            auth.authenticate_credentials(launcher_token.key)
+            AdminTokenAuthentication().authenticate(request)
 
-        # If user is staff, it should succeed
+    def test_admin_token_is_rejected_for_launcher_scope(self):
+        """The boundary holds in both directions."""
+        from rest_framework.test import APIRequestFactory
+
+        from apps.launcher.authentication import LauncherTokenAuthentication
+
         self.user.is_staff = True
         self.user.save()
-        user, token = auth.authenticate_credentials(launcher_token.key)
-        self.assertEqual(user, self.user)
-        self.assertEqual(token, launcher_token)
+        admin_token = AuthToken.issue(self.user, AuthToken.Scope.ADMIN)
+
+        request = APIRequestFactory().get(
+            "/", HTTP_AUTHORIZATION=f"Launcher {admin_token.key}"
+        )
+        with self.assertRaises(AuthenticationFailed):
+            LauncherTokenAuthentication().authenticate(request)
+
+    def test_admin_scope_requires_staff(self):
+        from rest_framework.test import APIRequestFactory
+
+        from apps.accounts.authentication import AdminTokenAuthentication
+
+        token = AuthToken.issue(self.user, AuthToken.Scope.ADMIN)
+        request = APIRequestFactory().get(
+            "/", HTTP_AUTHORIZATION=f"Token {token.key}"
+        )
+        with self.assertRaises(AuthenticationFailed):
+            AdminTokenAuthentication().authenticate(request)
 
 
 class AuthAPITest(TestCase):

@@ -7,7 +7,7 @@ import os
 import mimetypes
 from apps.servers.models import Server, MinecraftServer, ServerTypeConfig, ServerMod, ModpackFile
 from .authentication import LauncherTokenAuthentication
-from .models import WSToken
+from apps.accounts.models import AuthToken
 
 
 class LauncherServersView(APIView):
@@ -414,7 +414,7 @@ class LauncherWSTokenView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        ws_token = WSToken.create_for_user(request.user)
+        ws_token = AuthToken.issue(request.user, AuthToken.Scope.WEBSOCKET)
         return Response({
             "token": ws_token.key,
             "expires_at": ws_token.expires_at.isoformat(),

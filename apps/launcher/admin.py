@@ -1,17 +1,9 @@
 from django.contrib import admin
-from .models import LauncherToken, LauncherVersion
+from .models import LauncherVersion
 
 
-@admin.register(LauncherToken)
-class LauncherTokenAdmin(admin.ModelAdmin):
-    list_display = ["key_short", "user", "created_at"]
-    search_fields = ["user__username", "key"]
-    readonly_fields = ["key", "created_at"]
-
-    def key_short(self, obj):
-        return f"{obj.key[:16]}..."
-
-    key_short.short_description = "Token"
+# Launcher tokens are registered in apps/accounts/admin.py now, as scopes on
+# the unified AuthToken model.
 
 
 @admin.register(LauncherVersion)
