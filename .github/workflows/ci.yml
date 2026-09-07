@@ -1,0 +1,90 @@
+name: CI
+
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: cybercraft
+          POSTGRES_PASSWORD: cybercraft
+          POSTGRES_DB: cybercraft_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    # CI runs the production settings path deliberately: that is the config
+    # that was broken before P1, and exercising it here is what stops it
+    # regressing. USE_SSL is on so check --deploy has nothing to complain
+    # about; nothing is actually redirected during a check.
+    env:
+      PRODUCTION: "1"
+      USE_SSL: "1"
+      SECRET_KEY: ci-only-not-a-real-secret
+      ALLOWED_HOSTS: localhost,127.0.0.1
+      DATABASE_URL: postgres://cybercraft:cybercraft@localhost:5432/cybercraft_test
+      REDIS_URL: redis://localhost:6379/0
+      BACKEND_URL: http://127.0.0.1:8000
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+
+      - name: Django system checks
+        run: python manage.py check
+
+      # Enabled at the end of P1. Before the settings package existed this
+      # could not pass: the star-import cycle meant DEBUG, the database and
+      # the SECURE_* block did not hold the values they appeared to.
+      - name: Deployment checks
+        run: python manage.py check --deploy
+
+      - name: Assert production settings really apply
+        run: |
+          python - <<'PY'
+          import django
+          django.setup()
+          from django.conf import settings as s
+          assert s.DEBUG is False, "DEBUG must be False under PRODUCTION"
+          assert "postgresql" in s.DATABASES["default"]["ENGINE"], s.DATABASES
+          assert "redis" in s.CHANNEL_LAYERS["default"]["BACKEND"].lower(), s.CHANNEL_LAYERS
+          assert "redis" in s.CACHES["default"]["BACKEND"].lower(), s.CACHES
+          assert not getattr(s, "CORS_ALLOW_ALL_ORIGINS", False), "dev CORS leaked into prod"
+          print("production settings verified")
+          PY
+
+      - name: Detect missing migrations
+        run: python manage.py makemigrations --check --dry-run
+
+      - name: Tests
+        run: python manage.py test
+
+      # Non-blocking: 98 findings on code that has never been linted.
+      - name: Lint
+        run: ruff check .
+        continue-on-error: true

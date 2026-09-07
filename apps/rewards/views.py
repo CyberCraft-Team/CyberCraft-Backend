@@ -4,6 +4,7 @@ from rest_framework.response import Response
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.generics import ListAPIView
 from django.db import transaction
+from apps.accounts.permissions import IsTrustedMod
 from apps.launcher.authentication import LauncherTokenAuthentication
 from apps.accounts.models import User
 from .models import Rank, DailyBonus, CCTransaction
@@ -17,7 +18,12 @@ from .serializers import (
 
 
 class RankListView(ListAPIView):
-    """Barcha ranklar ro'yxati"""
+    """Barcha ranklar ro'yxati — ochiq.
+
+    The website's donate page reads this before the visitor logs in, so it
+    stays public. Unlike player-rank it exposes no player data: only the
+    shop catalogue.
+    """
 
     permission_classes = [AllowAny]
     authentication_classes = []
@@ -193,7 +199,7 @@ class CCTransactionHistoryView(ListAPIView):
 class PlayerRankView(APIView):
     """Mod uchun - player rankini olish"""
 
-    permission_classes = [AllowAny]
+    permission_classes = [IsTrustedMod]
     authentication_classes = []
 
     def get(self, request):
@@ -234,7 +240,7 @@ class PlayerRankView(APIView):
 class BulkPlayerRanksView(APIView):
     """Mod uchun - bir nechta playerlarning ranklarini olish"""
 
-    permission_classes = [AllowAny]
+    permission_classes = [IsTrustedMod]
     authentication_classes = []
 
     def post(self, request):

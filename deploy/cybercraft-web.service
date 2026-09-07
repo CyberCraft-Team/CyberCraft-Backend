@@ -1,0 +1,54 @@
+# CyberCraft backend — ASGI web process.
+#
+#   sudo cp deploy/cybercraft-web.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now cybercraft-web
+#
+# Daphne rather than gunicorn: the app is ASGI and serves WebSockets for the
+# server console and launcher events.
+#
+# One process only. MinecraftServerManager keeps the child-process table,
+# the online-player map and the shutdown flag in class attributes, so a
+# second worker would not see servers started by the first. P3 moves that
+# state into a dedicated supervisor and lifts this restriction.
+
+[Unit]
+Description=CyberCraft backend (Daphne ASGI)
+After=network-online.target docker.service
+Wants=network-online.target docker.service
+
+[Service]
+Type=simple
+User=cybercraft
+Group=cybercraft
+WorkingDirectory=/srv/cybercraft/backend
+
+Environment=PRODUCTION=1
+Environment=DJANGO_SETTINGS_MODULE=config.settings
+EnvironmentFile=/srv/cybercraft/backend/.env
+
+ExecStart=/srv/cybercraft/backend/env/bin/daphne \
+    -b 127.0.0.1 \
+    -p 8000 \
+    --proxy-headers \
+    config.asgi:application
+
+Restart=on-failure
+RestartSec=5s
+
+# Minecraft servers are spawned as children of this unit. The default
+# KillMode would terminate the whole cgroup on stop, killing running game
+# servers along with the web process; `mixed` signals only the main process
+# so the atexit handler can shut servers down cleanly.
+KillMode=mixed
+TimeoutStopSec=90
+
+# Java children need real headroom.
+LimitNOFILE=65535
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cybercraft-web
+
+[Install]
+WantedBy=multi-user.target

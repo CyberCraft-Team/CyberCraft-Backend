@@ -12,14 +12,16 @@ class WSTokenAuthMixin:
 
     @database_sync_to_async
     def get_user_from_ws_token(self, token_key):
-        from apps.launcher.models import WSToken
+        from apps.accounts.models import AuthToken
         from django.contrib.auth.models import AnonymousUser
 
         try:
-            token = WSToken.objects.select_related("user").get(key=token_key)
+            token = AuthToken.objects.select_related("user").get(
+                key=token_key, scope=AuthToken.Scope.WEBSOCKET
+            )
             if not token.is_expired():
                 return token.user
-        except WSToken.DoesNotExist:
+        except AuthToken.DoesNotExist:
             pass
         return AnonymousUser()
 

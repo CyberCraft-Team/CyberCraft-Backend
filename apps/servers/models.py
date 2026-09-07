@@ -128,23 +128,40 @@ class ServerTypeConfig(models.Model):
     def __str__(self):
         return self.display_name
 
+    def _command_context(self, server):
+        """Placeholders available to install_command and run_command.
+
+        Templates are admin-editable, so a typo here surfaces as a KeyError
+        deep inside a subprocess launch. _format below turns that into a
+        message naming the bad placeholder and the valid ones.
+        """
+        return {
+            "java": "java",
+            "min_ram": server.min_ram,
+            "max_ram": server.max_ram,
+            "jar_file": self.jar_file_name,
+            "mc_version": server.minecraft_version,
+            "loader_version": server.loader_version or "",
+        }
+
+    def _format(self, template, server, field_name):
+        context = self._command_context(server)
+        try:
+            return template.format(**context)
+        except KeyError as exc:
+            raise ValueError(
+                f"{field_name} for server type '{self.server_type}' references "
+                f"unknown placeholder {exc}. Available: "
+                f"{', '.join('{' + k + '}' for k in sorted(context))}"
+            ) from exc
+
     def get_install_command(self, server):
         if not self.install_command:
             return None
-        return self.install_command.format(
-            java="java",
-            min_ram=server.min_ram,
-            max_ram=server.max_ram,
-            jar_file=self.jar_file_name,
-        )
+        return self._format(self.install_command, server, "install_command")
 
     def get_run_command(self, server):
-        return self.run_command.format(
-            java="java",
-            min_ram=server.min_ram,
-            max_ram=server.max_ram,
-            jar_file=self.jar_file_name,
-        )
+        return self._format(self.run_command, server, "run_command")
 
 
 class ServerJar(models.Model):

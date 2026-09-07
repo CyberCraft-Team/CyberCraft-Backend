@@ -17,15 +17,17 @@ import logging
 import hmac
 import hashlib
 import time
-from apps.launcher.models import LauncherToken
 from apps.launcher.authentication import LauncherTokenAuthentication
-from .models import AdminToken, User
+from .models import AuthToken, User
 from .serializers import (
     UserMinimalSerializer,
     AdminUserSerializer,
     UserRegisterSerializer,
 )
 from .authentication import AdminTokenAuthentication
+from .permissions import IsTrustedMod
+from apps.auditlog.models import AuditLog
+from apps.auditlog.utils import client_ip, record, record_flag_change
 from google.oauth2 import id_token
 from google.auth.transport import requests
 
@@ -174,8 +176,8 @@ class LauncherLoginView(APIView):
             )
 
         # Faqat eskirgan (expired) tokenlarni o'chirish va yangi yaratish
-        LauncherToken.objects.filter(user=user, expires_at__lt=timezone.now()).delete()
-        token = LauncherToken.objects.create(user=user)
+        AuthToken.objects.filter(user=user, scope=AuthToken.Scope.LAUNCHER).expired().delete()
+        token = AuthToken.issue(user, AuthToken.Scope.LAUNCHER)
 
         return Response(
             {
@@ -190,7 +192,7 @@ class LauncherLogoutView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        LauncherToken.objects.filter(user=request.user).delete()
+        AuthToken.objects.filter(user=request.user, scope=AuthToken.Scope.LAUNCHER).delete()
         return Response({"message": "Muvaffaqiyatli chiqildi"})
 
 
@@ -400,8 +402,13 @@ class AdminLoginView(APIView):
             )
 
         logger.info(f"Admin muvaffaqiyatli kirdi: username={username}")
-        AdminToken.objects.filter(user=user).delete()
-        token = AdminToken.objects.create(user=user)
+        token = AuthToken.issue(user, AuthToken.Scope.ADMIN)
+        AuditLog.log(
+            user=user,
+            action="login",
+            description=f"Admin panelga kirdi: {username}",
+            ip_address=client_ip(request),
+        )
 
         return Response(
             {
@@ -416,7 +423,7 @@ class AdminLogoutView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        AdminToken.objects.filter(user=request.user).delete()
+        AuthToken.objects.filter(user=request.user, scope=AuthToken.Scope.ADMIN).delete()
         return Response({"message": "Muvaffaqiyatli chiqildi"})
 
 
@@ -466,6 +473,7 @@ class AdminUserWhitelistView(APIView):
 
         user.is_whitelisted = bool(value)
         user.save(update_fields=["is_whitelisted"])
+        record_flag_change(request, user, "is_whitelisted", user.is_whitelisted)
         logger.info(f"Admin {request.user.username}: user {user.username} whitelist={user.is_whitelisted}")
         return Response({"is_whitelisted": user.is_whitelisted, "message": "Muvaffaqiyatli saqlandi"})
 
@@ -487,6 +495,7 @@ class AdminUserOperatorView(APIView):
 
         user.is_operator = bool(value)
         user.save(update_fields=["is_operator"])
+        record_flag_change(request, user, "is_operator", user.is_operator)
         logger.info(f"Admin {request.user.username}: user {user.username} operator={user.is_operator}")
         return Response({"is_operator": user.is_operator, "message": "Muvaffaqiyatli saqlandi"})
 
@@ -516,6 +525,7 @@ class AdminUserStaffView(APIView):
 
         user.is_staff = bool(value)
         user.save(update_fields=["is_staff"])
+        record_flag_change(request, user, "is_staff", user.is_staff)
         logger.info(f"Admin {request.user.username}: user {user.username} staff={user.is_staff}")
         return Response({"is_staff": user.is_staff, "message": "Muvaffaqiyatli saqlandi"})
 
@@ -543,6 +553,8 @@ class AdminUserBanView(APIView):
             user.banned_until = None
             user.is_active = True
             user.save(update_fields=["is_banned", "ban_reason", "banned_until", "is_active"])
+            record(request, "unban", target=user,
+                   description=f"{user.username} ban dan chiqarildi")
             logger.info(f"Admin {request.user.username}: user {user.username} UNBAN qilindi")
             return Response({"is_banned": False, "message": f"{user.username} ban dan chiqarildi"})
         else:
@@ -559,6 +571,9 @@ class AdminUserBanView(APIView):
             else:
                 user.banned_until = None  # Doimiy ban
             user.save(update_fields=["is_banned", "ban_reason", "banned_until", "is_active"])
+            record(request, "ban", target=user,
+                   description=f"{user.username} ban qilindi. Sabab: {reason}",
+                   changes={"reason": reason, "banned_until": banned_until})
             logger.info(f"Admin {request.user.username}: user {user.username} BAN qilindi. Sabab: {reason}")
             return Response({"is_banned": True, "message": f"{user.username} ban qilindi"})
 
@@ -602,36 +617,13 @@ class AdminUserSuperuserView(APIView):
             user.save(update_fields=["is_superuser"])
 
         action_str = "SUPERUSER qilindi" if user.is_superuser else "Superuserlikdan chiqarildi"
+        record_flag_change(request, user, "is_superuser", user.is_superuser)
         logger.info(f"Admin {request.user.username}: user {user.username} {action_str}")
         return Response({
             "is_superuser": user.is_superuser,
             "is_staff": user.is_staff,
             "message": f"{user.username} {action_str.lower()}",
         })
-
-
-@api_view(["POST"])
-@permission_classes([AllowAny])
-def minecraft_auth(request):
-    username = request.data.get("username")
-    uuid = request.data.get("uuid")
-
-    if not username or not uuid:
-        return Response(status=400)
-
-    user = User.objects.filter(username=username).first()
-
-    if not user:
-        return Response(status=403)
-
-    if user.minecraft_uuid != uuid:
-        user.minecraft_uuid = uuid
-        user.save(update_fields=["minecraft_uuid"])
-
-    if not user.is_whitelisted:
-        return Response(status=403)
-
-    return Response(status=200)
 
 
 class MinecraftSessionCreateView(APIView):
@@ -699,7 +691,7 @@ class MinecraftVerifyView(APIView):
     player kirishga ruxsat beriladi.
     """
 
-    permission_classes = [AllowAny]
+    permission_classes = [IsTrustedMod]
     authentication_classes = []
 
     def post(self, request):
@@ -1067,8 +1059,8 @@ class GoogleLoginView(APIView):
                 )
 
             # LauncherToken yaratish (vebsayt va launcher uchun, faqat eskirganlarini o'chirish)
-            LauncherToken.objects.filter(user=user, expires_at__lt=timezone.now()).delete()
-            token = LauncherToken.objects.create(user=user)
+            AuthToken.objects.filter(user=user, scope=AuthToken.Scope.LAUNCHER).expired().delete()
+            token = AuthToken.issue(user, AuthToken.Scope.LAUNCHER)
             logger.info(f"Token yaratildi: {user.username}")
 
             return Response(
@@ -1227,8 +1219,8 @@ class TelegramLoginView(APIView):
             assign_random_skin(user)
 
         # Token yaratish (faqat eskirganlarini o'chirish)
-        LauncherToken.objects.filter(user=user, expires_at__lt=timezone.now()).delete()
-        token = LauncherToken.objects.create(user=user)
+        AuthToken.objects.filter(user=user, scope=AuthToken.Scope.LAUNCHER).expired().delete()
+        token = AuthToken.issue(user, AuthToken.Scope.LAUNCHER)
 
         return Response({
             "token": token.key,

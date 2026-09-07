@@ -69,41 +69,90 @@ class User(AbstractUser):
         return self.username
 
 
-class AdminToken(models.Model):
-    TOKEN_LIFETIME_HOURS = 24
+class AuthTokenQuerySet(models.QuerySet):
+    def valid(self):
+        return self.filter(expires_at__gt=timezone.now())
 
-    key = models.CharField(max_length=40, primary_key=True)
-    user = models.OneToOneField(
-        User, related_name="admin_token", on_delete=models.CASCADE
+    def expired(self):
+        return self.filter(expires_at__lte=timezone.now())
+
+
+class AuthToken(models.Model):
+    """Opaque bearer token, scoped to what it is allowed to do.
+
+    Replaces three near-identical models (AdminToken, LauncherToken,
+    WSToken) that differed only in lifetime and key length. Keeping them
+    separate is what allowed AdminTokenAuthentication to fall back to a
+    30-day launcher token as an admin credential.
+
+    Opaque and database-backed rather than a JWT on purpose: a ban has to
+    take effect immediately, and revoking a row does that. A self-contained
+    token would stay valid until it expired.
+    """
+
+    class Scope(models.TextChoices):
+        LAUNCHER = "launcher", "Launcher"
+        ADMIN = "admin", "Admin"
+        WEBSOCKET = "ws", "WebSocket"
+
+    LIFETIMES = {
+        Scope.LAUNCHER: timedelta(days=30),
+        Scope.ADMIN: timedelta(hours=24),
+        Scope.WEBSOCKET: timedelta(minutes=10),
+    }
+
+    key = models.CharField(max_length=64, primary_key=True)
+    user = models.ForeignKey(
+        User, related_name="auth_tokens", on_delete=models.CASCADE
+    )
+    scope = models.CharField(
+        max_length=16, choices=Scope.choices, default=Scope.LAUNCHER, db_index=True
     )
     created_at = models.DateTimeField(auto_now_add=True)
-    expires_at = models.DateTimeField(null=True, blank=True)
+    expires_at = models.DateTimeField()
+    last_used_at = models.DateTimeField(null=True, blank=True)
+
+    objects = AuthTokenQuerySet.as_manager()
 
     class Meta:
-        db_table = "admin_tokens"
-        verbose_name = "Admin Token"
-        verbose_name_plural = "Admin Tokens"
+        db_table = "auth_tokens"
+        verbose_name = "Auth Token"
+        verbose_name_plural = "Auth Tokens"
+        indexes = [models.Index(fields=["user", "scope"])]
 
     def save(self, *args, **kwargs):
         if not self.key:
             self.key = self.generate_key()
         if not self.expires_at:
-            self.expires_at = timezone.now() + timedelta(
-                hours=self.TOKEN_LIFETIME_HOURS
-            )
+            self.expires_at = timezone.now() + self.LIFETIMES[self.Scope(self.scope)]
         return super().save(*args, **kwargs)
 
     def is_expired(self):
-        if self.expires_at is None:
-            return False
         return timezone.now() > self.expires_at
+
+    def touch(self):
+        """Record use without a full save; best-effort, never fatal."""
+        self.last_used_at = timezone.now()
+        AuthToken.objects.filter(pk=self.pk).update(last_used_at=self.last_used_at)
 
     @classmethod
     def generate_key(cls):
-        return binascii.hexlify(os.urandom(20)).decode()
+        return binascii.hexlify(os.urandom(32)).decode()
+
+    @classmethod
+    def issue(cls, user, scope):
+        """Mint a token. Admin scope is single-use-at-a-time, as before."""
+        scope = cls.Scope(scope)
+        if scope == cls.Scope.ADMIN:
+            cls.objects.filter(user=user, scope=scope).delete()
+        return cls.objects.create(user=user, scope=scope)
+
+    @classmethod
+    def purge_expired(cls):
+        return cls.objects.expired().delete()[0]
 
     def __str__(self):
-        return f"AdminToken({self.user.username})"
+        return f"AuthToken({self.user.username}, {self.scope})"
 
 
 class EmailVerificationToken(models.Model):
