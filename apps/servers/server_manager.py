@@ -37,6 +37,228 @@ class MinecraftServerManager:
     _is_shutting_down = False
     _online_players = {}
     _monitor_thread = None
+    # Servers whose JVM outlived the backend that started it. There is no
+    # Popen handle for these -- no stdin, no log pipe -- but the pid is still
+    # ours to watch and to stop.
+    _adopted = {}
+
+    # The statuses that claim a server is alive. Only these can go stale when
+    # the backend dies; "stopped" and "error" are already terminal. Kept as
+    # literals because the model cannot be imported at class-definition time.
+    ACTIVE_STATUSES = ("starting", "running", "stopping")
+
+    @classmethod
+    def _pid_alive_for(cls, server_id, pid):
+        """True when `pid` is up and really is this server's process."""
+        if not pid:
+            return False
+        try:
+            import psutil
+
+            proc = psutil.Process(int(pid))
+            if not proc.is_running() or proc.status() == psutil.STATUS_ZOMBIE:
+                return False
+            # Pids get recycled, so liveness on its own would happily adopt
+            # whatever unrelated program inherited the number.
+            return cls._is_server_process(str(server_id), int(pid), proc)
+        except Exception:
+            return False
+
+    @classmethod
+    def _terminate_pid_tree(cls, pid, timeout=15):
+        """
+        Stop a process this backend holds no Popen handle for.
+
+        Servers launched through run.bat/run.sh sit under a shell, so the
+        recorded pid is the shell's; killing only that would orphan the JVM
+        beneath it, which keeps the port bound and makes the next start fail.
+        """
+        try:
+            import psutil
+
+            proc = psutil.Process(int(pid))
+        except Exception:
+            return False
+
+        try:
+            victims = proc.children(recursive=True)
+        except Exception:
+            victims = []
+        victims.append(proc)
+
+        for victim in victims:
+            try:
+                victim.terminate()
+            except Exception:
+                pass
+
+        try:
+            _, alive = psutil.wait_procs(victims, timeout=timeout)
+        except Exception:
+            alive = []
+        for victim in alive:
+            try:
+                victim.kill()
+            except Exception:
+                pass
+        return True
+
+    @classmethod
+    def _collect_stats(cls, root, cache):
+        """
+        CPU and memory for the whole process tree under `root`.
+
+        The recorded pid is usually the shell running run.bat, and the JVM
+        doing all the work is its child -- measuring only the root reported
+        a busy server as 0% CPU and a couple of megabytes.
+
+        `cache` maps pid -> psutil.Process and is carried between cycles on
+        purpose: cpu_percent(interval=None) reports the change since the
+        previous call *on the same object*, so building fresh ones every
+        time would always read zero.
+        """
+        try:
+            members = [root] + root.children(recursive=True)
+        except Exception:
+            members = [root]
+
+        live = {}
+        cpu = 0.0
+        memory_bytes = 0
+        for member in members:
+            tracked = cache.get(member.pid, member)
+            try:
+                cpu += tracked.cpu_percent(interval=None)
+                memory_bytes += tracked.memory_info().rss
+            except Exception:
+                # Gone or unreadable between listing and measuring; it just
+                # drops out of the cache.
+                continue
+            live[member.pid] = tracked
+
+        cache.clear()
+        cache.update(live)
+        return cpu, memory_bytes / (1024 * 1024)
+
+    @classmethod
+    def _mark_stopped(cls, server, reason):
+        """Record that a server the backend was tracking is no longer up."""
+        from .models import MinecraftServer, ServerLog
+
+        server_id = str(server.id)
+        # Conditional update: if the log reader already finalised this server
+        # we neither race it nor write a second log line about it.
+        updated = (
+            MinecraftServer.objects.filter(pk=server.pk)
+            .exclude(status=MinecraftServer.Status.STOPPED)
+            .update(
+                status=MinecraftServer.Status.STOPPED,
+                pid=None,
+                current_players=0,
+            )
+        )
+        if not updated:
+            return False
+
+        cls._processes.pop(server_id, None)
+        cls._adopted.pop(server_id, None)
+        cls._online_players.pop(server_id, None)
+
+        try:
+            ServerLog.objects.create(
+                server=server,
+                level="warn",
+                message=f"Server to'xtagan deb belgilandi: {reason}",
+            )
+        except Exception:
+            pass
+
+        channel_layer = get_channel_layer()
+        if channel_layer:
+            try:
+                async_to_sync(channel_layer.group_send)(
+                    f"server_{server_id}",
+                    {"type": "server_status", "status": "stopped"},
+                )
+                cls.broadcast_status_update()
+            except Exception:
+                pass
+        return True
+
+    @classmethod
+    def reconcile_statuses(cls):
+        """
+        Line the stored statuses back up with what is actually on the machine.
+
+        A server's status is only ever written from inside this process:
+        start_server sets "starting", the log reader flips it to "running"
+        and, in its finally block, to "stopped". None of that survives the
+        backend being killed, crashing, or reloaded -- whatever the row said
+        at that moment stays frozen there, so the panel goes on reporting a
+        server as starting or running with no JVM behind it. Run at startup
+        so a fresh boot never inherits a stale claim.
+        """
+        from .models import MinecraftServer, ServerLog
+
+        repaired = []
+
+        # An interrupted install has no pid of its own to check, so it can
+        # neither be resumed nor verified -- only reported.
+        for server in MinecraftServer.objects.filter(
+            status=MinecraftServer.Status.INSTALLING
+        ):
+            MinecraftServer.objects.filter(pk=server.pk).update(
+                status=MinecraftServer.Status.ERROR, pid=None, current_players=0
+            )
+            repaired.append((server, "install yarim yo'lda uzilib qolgan"))
+
+        for server in MinecraftServer.objects.filter(
+            status__in=cls.ACTIVE_STATUSES
+        ):
+            server_id = str(server.id)
+            previous = server.status
+
+            if cls._pid_alive_for(server_id, server.pid):
+                # It outlived the restart. Its console is out of reach now,
+                # so adopt the pid: stop_server can still reach it and the
+                # monitor keeps watching it.
+                cls._adopted[server_id] = server.pid
+                # Joins and leaves were counted off the console this backend
+                # no longer has, so the old figure can never be corrected.
+                # Reset it rather than freeze a number that stopped meaning
+                # anything the moment the previous backend died.
+                cls._online_players[server_id] = set()
+                MinecraftServer.objects.filter(pk=server.pk).update(
+                    status=MinecraftServer.Status.RUNNING, current_players=0
+                )
+                continue
+
+            MinecraftServer.objects.filter(pk=server.pk).update(
+                status=MinecraftServer.Status.STOPPED, pid=None, current_players=0
+            )
+            cls._online_players.pop(server_id, None)
+            cls._adopted.pop(server_id, None)
+            repaired.append(
+                (server, f"'{previous}' holatida qolib ketgan, jarayoni topilmadi")
+            )
+
+        for server, reason in repaired:
+            try:
+                ServerLog.objects.create(
+                    server=server,
+                    level="warn",
+                    message=f"Backend qayta ishga tushdi: {reason}. Holat tiklandi.",
+                )
+            except Exception:
+                pass
+
+        if repaired:
+            try:
+                cls.broadcast_status_update()
+            except Exception:
+                pass
+
+        return len(repaired)
 
     @classmethod
     def get_servers_root(cls):
@@ -189,12 +411,33 @@ class MinecraftServerManager:
             f.writelines(out)
 
     @classmethod
-    def _patch_script_content(cls, content, agent_arg):
+    def _is_managed_jvm_arg(cls, arg):
+        """True for the JVM arguments this panel owns and rewrites each start."""
+        if arg.startswith("-javaagent:") and "authlib-injector" in arg:
+            return True
+        return arg.startswith("-Dcybercraft.")
+
+    @classmethod
+    def _patch_script_content(cls, content, jvm_args):
+        if isinstance(jvm_args, str):
+            jvm_args = [jvm_args]
+        injected = " ".join(jvm_args)
         cleaned_content = re.sub(r"-javaagent:[^\s]*authlib-injector[^\s]*", "", content)
+        cleaned_content = re.sub(r"-Dcybercraft\.[^\s]*", "", cleaned_content)
         lines = cleaned_content.splitlines()
         new_lines = []
         for line in lines:
             stripped = line.strip().lower()
+
+            # Forge's run.bat ends in "pause" so a human who double-clicked it
+            # can read the output. Under the panel nobody ever presses a key:
+            # the shell sat there for ever after the JVM died, still holding a
+            # live pid in the server directory, so the server went on being
+            # reported as running long after it had crashed.
+            if stripped == "pause" or stripped.startswith("pause "):
+                new_lines.append("rem pause  (panel tomonidan olib tashlandi)")
+                continue
+
             if (
                 not stripped 
                 or stripped.startswith("#") 
@@ -209,7 +452,7 @@ class MinecraftServerManager:
             match = re.search(r"^(\s*(?:exec\s+|start\s+|@\s*)?)(\bjava\b)", line, flags=re.IGNORECASE)
             if match:
                 prefix = match.group(1)
-                line = line[:match.start()] + prefix + f"java {agent_arg}" + line[match.end():]
+                line = line[:match.start()] + prefix + f"java {injected}" + line[match.end():]
             new_lines.append(line)
         return "\n".join(new_lines)
 
@@ -259,6 +502,7 @@ class MinecraftServerManager:
             server.save()
 
             cls.create_server_properties(server)
+            cls.sync_mods_from_disk(server)
             return True
         except zipfile.BadZipFile as e:
             print(f"Error setting up server from ZIP: {e}")
@@ -266,6 +510,76 @@ class MinecraftServerManager:
         except Exception as e:
             print(f"Error setting up server from ZIP: {e}")
             raise e
+
+    @classmethod
+    def sync_mods_from_disk(cls, server):
+        """Bring the ServerMod rows in line with the jars in <server>/mods.
+
+        The panel's mod list reads the database, but a server uploaded as a
+        ZIP arrives with its jars already on disk and no rows to describe
+        them -- so the list showed nothing while 70-odd mods sat in the
+        folder. Nothing is copied into MEDIA_ROOT: the server directory is
+        the one copy that matters, and duplicating a modpack there would
+        both waste the space and let the two copies drift apart.
+        """
+        import hashlib
+
+        from .models import ServerMod
+
+        def sha256_of(path):
+            digest = hashlib.sha256()
+            with open(path, "rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            return digest.hexdigest()
+
+        server_path = cls.get_server_path(server)
+        mods_dir = os.path.join(server_path, "mods")
+        if not os.path.isdir(mods_dir):
+            return 0
+
+        on_disk = {}
+        for file_name in os.listdir(mods_dir):
+            if not file_name.lower().endswith(".jar"):
+                continue
+            full_path = os.path.join(mods_dir, file_name)
+            if os.path.isfile(full_path):
+                on_disk[file_name] = os.path.getsize(full_path)
+
+        existing = {mod.file_name: mod for mod in server.mods.all()}
+
+        # A jar that is gone from the folder is gone from the server. Rows
+        # carrying an uploaded file are left alone -- those were added
+        # through the panel and own their copy in MEDIA_ROOT.
+        for file_name, mod in existing.items():
+            if file_name not in on_disk and not mod.file:
+                mod.delete()
+
+        # Hashing is what makes this loop cost anything, so it only runs for
+        # a jar the database has not seen at this size: the launcher checks
+        # the hash before re-downloading a mod it already has.
+        changed = 0
+        for file_name, size in sorted(on_disk.items()):
+            mod = existing.get(file_name)
+            full_path = os.path.join(mods_dir, file_name)
+
+            if mod is None:
+                ServerMod.objects.create(
+                    server=server,
+                    name=os.path.splitext(file_name)[0],
+                    file_name=file_name,
+                    file_size=size,
+                    sha256_hash=sha256_of(full_path),
+                    status=ServerMod.ModStatus.ENABLED,
+                )
+                changed += 1
+            elif not mod.file and (mod.file_size != size or not mod.sha256_hash):
+                mod.file_size = size
+                mod.sha256_hash = sha256_of(full_path)
+                mod.save(update_fields=["file_size", "sha256_hash"])
+                changed += 1
+
+        return changed
 
     @classmethod
     def create_server_properties(cls, server):
@@ -415,8 +729,13 @@ enable-command-block=true
         ):
             raise Exception("Server hali install qilinmagan. Avval install qiling.")
 
+        # Drop the previous run's pid before announcing "starting". It is
+        # dead by now, and leaving it in place would let the monitor test a
+        # stale number and declare this start-up already stopped.
         server.status = MinecraftServer.Status.STARTING
+        server.pid = None
         server.save()
+        cls._adopted.pop(str(server.id), None)
 
         channel_layer = get_channel_layer()
         if channel_layer:
@@ -426,7 +745,21 @@ enable-command-block=true
             )
             cls.broadcast_status_update()
 
-        if server_type_config:
+        # A server that arrived as a ZIP is already built, and the run script
+        # it shipped with is the authoritative way to launch it: that script
+        # names the exact loader version, module path and args file the
+        # archive was assembled around. The per-type run_command is a
+        # fallback for servers the panel installed itself -- applied to an
+        # uploaded archive it produced "java -jar server.jar", and an archive
+        # of a modded server has no such jar. server_jar is null exactly for
+        # the archive case, so installed servers keep their existing path.
+        run_script_cmd = (
+            cls._run_script_command(server_path) if not server.server_jar else None
+        )
+
+        if run_script_cmd:
+            java_cmd = run_script_cmd
+        elif server_type_config:
             if server_type_config.requires_args_file:
                 java_cmd = cls._build_forge_command(
                     server_path, server_type_config, server
@@ -437,49 +770,38 @@ enable-command-block=true
 
                 java_cmd = shlex.split(run_cmd_str)
         else:
-            is_windows = platform.system() == "Windows"
-            run_script = "run.bat" if is_windows else "run.sh"
-            run_script_path = os.path.join(server_path, run_script)
+            jar_name = (server.jar_file or "").strip() or "server.jar"
+            jar_path = os.path.join(server_path, jar_name)
 
-            if os.path.exists(run_script_path):
-                java_cmd = (
-                    ["cmd", "/c", run_script, "nogui"]
-                    if is_windows
-                    else ["bash", run_script, "nogui"]
+            if not os.path.exists(jar_path):
+                jar_candidates = sorted(
+                    [
+                        file_name
+                        for file_name in os.listdir(server_path)
+                        if file_name.lower().endswith(".jar")
+                    ]
                 )
-            else:
-                jar_name = (server.jar_file or "").strip() or "server.jar"
-                jar_path = os.path.join(server_path, jar_name)
-
-                if not os.path.exists(jar_path):
-                    jar_candidates = sorted(
-                        [
-                            file_name
-                            for file_name in os.listdir(server_path)
-                            if file_name.lower().endswith(".jar")
-                        ]
+                if "server.jar" in jar_candidates:
+                    jar_name = "server.jar"
+                elif len(jar_candidates) == 1:
+                    jar_name = jar_candidates[0]
+                else:
+                    raise Exception(
+                        "Ishga tushirish uchun JAR fayl topilmadi. "
+                        "Zip ichida server.jar yoki bitta .jar fayl bo'lishi kerak."
                     )
-                    if "server.jar" in jar_candidates:
-                        jar_name = "server.jar"
-                    elif len(jar_candidates) == 1:
-                        jar_name = jar_candidates[0]
-                    else:
-                        raise Exception(
-                            "Ishga tushirish uchun JAR fayl topilmadi. "
-                            "Zip ichida server.jar yoki bitta .jar fayl bo'lishi kerak."
-                        )
 
-                    server.jar_file = jar_name
-                    server.save(update_fields=["jar_file", "updated_at"])
+                server.jar_file = jar_name
+                server.save(update_fields=["jar_file", "updated_at"])
 
-                java_cmd = [
-                    "java",
-                    f"-Xms{server.min_ram}M",
-                    f"-Xmx{server.max_ram}M",
-                    "-jar",
-                    jar_name,
-                    "nogui",
-                ]
+            java_cmd = [
+                "java",
+                f"-Xms{server.min_ram}M",
+                f"-Xmx{server.max_ram}M",
+                "-jar",
+                jar_name,
+                "nogui",
+            ]
 
         server.online_mode = True
         server.save(update_fields=["online_mode"])
@@ -489,12 +811,22 @@ enable-command-block=true
         ensure_backend_authlib_injector(authlib_path)
         
         backend_url = getattr(settings, "BACKEND_URL", "http://127.0.0.1:8000")
-        yggdrasil_url = f"{backend_url.rstrip('/')}/api/v1/yggdrasil/"
+        backend_url = backend_url.rstrip("/")
+        yggdrasil_url = f"{backend_url}/api/v1/yggdrasil/"
         agent_arg = f"-javaagent:{authlib_path}={yggdrasil_url}"
 
+        # The in-game mod reads these two. Without the key a backend that has
+        # MOD_API_KEY set answers 403 to every rank lookup, and the failure is
+        # invisible from outside: panel fine, server fine, ranks never appear.
+        jvm_args = [agent_arg, f"-Dcybercraft.api={backend_url}"]
+        mod_api_key = getattr(settings, "MOD_API_KEY", "")
+        if mod_api_key:
+            jvm_args.append(f"-Dcybercraft.key={mod_api_key}")
+
         if java_cmd and (java_cmd[0] == "java" or java_cmd[0].endswith("/java") or java_cmd[0].endswith("\\java") or java_cmd[0].endswith("java.exe")):
-            java_cmd = [arg for arg in java_cmd if not (arg.startswith("-javaagent:") and "authlib-injector" in arg)]
-            java_cmd.insert(1, agent_arg)
+            java_cmd = [arg for arg in java_cmd if not cls._is_managed_jvm_arg(arg)]
+            for offset, arg in enumerate(jvm_args):
+                java_cmd.insert(1 + offset, arg)
 
         user_args_path = os.path.join(server_path, "user_jvm_args.txt")
         if os.path.exists(user_args_path):
@@ -502,8 +834,10 @@ enable-command-block=true
                 with open(user_args_path, "r", encoding="utf-8") as f:
                     content = f.read()
                 lines = content.splitlines()
-                cleaned_lines = [l for l in lines if not ("-javaagent:" in l and "authlib-injector" in l)]
-                cleaned_lines.append(agent_arg)
+                cleaned_lines = [
+                    l for l in lines if not cls._is_managed_jvm_arg(l.strip())
+                ]
+                cleaned_lines.extend(jvm_args)
                 with open(user_args_path, "w", encoding="utf-8") as f:
                     f.write("\n".join(cleaned_lines) + "\n")
             except Exception as e:
@@ -514,7 +848,7 @@ enable-command-block=true
             try:
                 with open(run_bat_path, "r", encoding="utf-8") as f:
                     content = f.read()
-                new_content = cls._patch_script_content(content, agent_arg)
+                new_content = cls._patch_script_content(content, jvm_args)
                 if new_content != content:
                     with open(run_bat_path, "w", encoding="utf-8") as f:
                         f.write(new_content)
@@ -526,7 +860,7 @@ enable-command-block=true
             try:
                 with open(run_sh_path, "r", encoding="utf-8") as f:
                     content = f.read()
-                new_content = cls._patch_script_content(content, agent_arg)
+                new_content = cls._patch_script_content(content, jvm_args)
                 if new_content != content:
                     with open(run_sh_path, "w", encoding="utf-8") as f:
                         f.write(new_content)
@@ -575,19 +909,35 @@ enable-command-block=true
             raise e
 
     @classmethod
+    def _run_script_command(cls, server_path):
+        """The launcher script an uploaded archive or an installer left behind.
+
+        Both scripts are named by absolute path. Passing the bare name relied
+        on the shell searching its working directory, which Windows switches
+        off whenever NoDefaultCurrentDirectoryInExePath is set in the
+        environment -- and then cmd answers "'run.bat' is not recognized"
+        even though the file is sitting right there.
+        """
+        if platform.system() == "Windows":
+            run_script = os.path.join(server_path, "run.bat")
+            if os.path.exists(run_script):
+                return ["cmd", "/c", run_script, "nogui"]
+            return None
+
+        run_script = os.path.join(server_path, "run.sh")
+        if os.path.exists(run_script):
+            return ["bash", run_script, "nogui"]
+        return None
+
+    @classmethod
     def _build_forge_command(cls, server_path, server_type_config, server):
         """Forge/NeoForge uchun args file'dan command yaratadi"""
 
         is_windows = platform.system() == "Windows"
 
-        if is_windows:
-            run_script = os.path.join(server_path, "run.bat")
-            if os.path.exists(run_script):
-                return ["cmd", "/c", "run.bat", "nogui"]
-        else:
-            run_script = os.path.join(server_path, "run.sh")
-            if os.path.exists(run_script):
-                return ["bash", "run.sh", "nogui"]
+        run_script_cmd = cls._run_script_command(server_path)
+        if run_script_cmd:
+            return run_script_cmd
 
         java_cmd = ["java", f"-Xms{server.min_ram}M", f"-Xmx{server.max_ram}M"]
 
@@ -756,8 +1106,35 @@ enable-command-block=true
         server_id = str(server.id)
 
         if server_id not in cls._processes:
+            # No pipe to this server: either it is genuinely down, or its JVM
+            # was inherited from an earlier backend run. Relabelling the row
+            # and walking away used to leave that JVM up, still holding the
+            # port, so the next start failed on an address already in use.
+            orphan_pid = cls._adopted.pop(server_id, None) or server.pid
+            if cls._pid_alive_for(server_id, orphan_pid):
+                cls._terminate_pid_tree(orphan_pid)
+                if not skip_log:
+                    try:
+                        ServerLog.objects.create(
+                            server=server,
+                            level="warn",
+                            message=(
+                                "Oldingi ishga tushirishdan qolgan jarayon "
+                                f"to'xtatildi (PID: {orphan_pid})"
+                            ),
+                        )
+                    except Exception:
+                        pass
+
             server.status = MinecraftServer.Status.STOPPED
+            server.pid = None
+            server.current_players = 0
             server.save()
+            cls._online_players.pop(server_id, None)
+            try:
+                cls.broadcast_status_update()
+            except Exception:
+                pass
             return True
 
         process = cls._processes[server_id]
@@ -802,9 +1179,21 @@ enable-command-block=true
             return
         cls._is_shutting_down = True
         
-        processes = list(cls._processes.values())
+        tracked = list(cls._processes.items())
         cls._processes.clear()
-        
+        processes = [process for _, process in tracked]
+        touched_ids = [server_id for server_id, _ in tracked]
+
+        # JVMs inherited from an earlier run have no stdin to say "stop" to,
+        # so they get terminated directly rather than left behind holding
+        # their ports.
+        adopted = list(cls._adopted.items())
+        cls._adopted.clear()
+        for server_id, pid in adopted:
+            if cls._pid_alive_for(server_id, pid):
+                cls._terminate_pid_tree(pid, timeout=10)
+            touched_ids.append(server_id)
+
         for process in processes:
             try:
                 process.stdin.write("stop\n")
@@ -830,6 +1219,18 @@ enable-command-block=true
                     process.kill()
                 except Exception:
                     pass
+
+        # The log-reader threads normally record this, but the interpreter is
+        # on its way out and may never schedule them again. Without this the
+        # rows keep claiming "running" until the next boot reconciles them.
+        try:
+            from .models import MinecraftServer
+
+            MinecraftServer.objects.filter(id__in=touched_ids).update(
+                status=MinecraftServer.Status.STOPPED, pid=None, current_players=0
+            )
+        except Exception:
+            pass
 
     @classmethod
     def restart_server(cls, server):
@@ -862,7 +1263,7 @@ enable-command-block=true
     @classmethod
     def get_server_status(cls, server):
         server_id = str(server.id)
-        is_running = server_id in cls._processes
+        is_running = server_id in cls._processes or server_id in cls._adopted
 
         return {
             "id": str(server.id),
@@ -1087,52 +1488,87 @@ enable-command-block=true
         
         channel_layer = get_channel_layer()
         process_caches = {}
-        
+        stat_caches = {}
+
+        # First act of the monitor, before it reports anything: repair the
+        # statuses the previous backend never got to close out.
+        try:
+            repaired = cls.reconcile_statuses()
+            if repaired:
+                print(f"[servers] {repaired} ta serverning eskirgan holati tiklandi")
+        except Exception as exc:
+            print(f"[servers] holatlarni tiklab bo'lmadi: {exc}")
+
         while not cls._is_shutting_down:
             time.sleep(2)
-            
-            # Find all running servers with active PIDs
-            running_servers = MinecraftServer.objects.filter(
-                status=MinecraftServer.Status.RUNNING, 
-                pid__isnull=False
-            )
-            
-            for server in running_servers:
-                server_id = str(server.id)
-                pid = server.pid
+            try:
+                # Every status that claims the server is alive, not just
+                # "running": a server killed while starting used to sit at
+                # "starting" for ever, because nothing here ever looked at it.
+                active_servers = MinecraftServer.objects.filter(
+                    status__in=cls.ACTIVE_STATUSES,
+                    pid__isnull=False,
+                )
+
+                for server in active_servers:
+                    server_id = str(server.id)
+                    pid = server.pid
                 
-                try:
-                    # Get or create cached Process instance
-                    if server_id not in process_caches or process_caches[server_id].pid != pid:
-                        process_caches[server_id] = psutil.Process(pid)
+                    try:
+                        # Get or create cached Process instance
+                        if server_id not in process_caches or process_caches[server_id].pid != pid:
+                            process_caches[server_id] = psutil.Process(pid)
                         
-                    proc = process_caches[server_id]
+                        proc = process_caches[server_id]
                     
-                    if not proc.is_running() or not cls._is_server_process(server_id, pid, proc):
-                        continue
-                        
-                    # Calculate stats (interval=None is non-blocking and works with cached Process instance)
-                    cpu = proc.cpu_percent(interval=None)
-                    mem_info = proc.memory_info()
-                    memory_mb = mem_info.rss / (1024 * 1024)
-                    
-                    if channel_layer:
-                        async_to_sync(channel_layer.group_send)(
-                            f"server_{server_id}",
-                            {
-                                "type": "server_stats",
-                                "stats": {
-                                    "cpu": cpu,
-                                    "memory": round(memory_mb, 1),
-                                    "timestamp": datetime.now().isoformat()
-                                }
-                            }
+                        if not proc.is_running() or not cls._is_server_process(server_id, pid, proc):
+                            process_caches.pop(server_id, None)
+                            stat_caches.pop(server_id, None)
+                            cls._mark_stopped(server, "jarayon topilmadi")
+                            continue
+
+                        if server.status != MinecraftServer.Status.RUNNING:
+                            # Alive, but not reported running yet. The log reader
+                            # owns that flip -- it is the only thing that knows
+                            # when the world has finished loading.
+                            continue
+
+                        # Non-blocking, and covers the JVM under the shell.
+                        cpu, memory_mb = cls._collect_stats(
+                            proc, stat_caches.setdefault(server_id, {})
                         )
-                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                    if server_id in process_caches:
-                        del process_caches[server_id]
-                except Exception as e:
-                    print(f"Error in monitor loop for server {server_id}: {e}")
+                    
+                        if channel_layer:
+                            async_to_sync(channel_layer.group_send)(
+                                f"server_{server_id}",
+                                {
+                                    "type": "server_stats",
+                                    "stats": {
+                                        "cpu": cpu,
+                                        "memory": round(memory_mb, 1),
+                                        "timestamp": datetime.now().isoformat()
+                                    }
+                                }
+                            )
+                    except psutil.AccessDenied:
+                        # Says nothing about whether the server is up, so leave
+                        # the status alone and retry with a fresh handle.
+                        process_caches.pop(server_id, None)
+                        stat_caches.pop(server_id, None)
+                    except (psutil.NoSuchProcess, psutil.ZombieProcess):
+                        process_caches.pop(server_id, None)
+                        stat_caches.pop(server_id, None)
+                        cls._mark_stopped(server, "jarayon yo'qoldi")
+                    except Exception as e:
+                        print(f"Error in monitor loop for server {server_id}: {e}")
+            except Exception as exc:
+                # A transient database lock or a psutil hiccup used to
+                # escape this loop and kill the thread outright, and
+                # then every status stayed frozen at whatever it last
+                # said -- precisely the drift this monitor exists to
+                # correct. Losing one cycle is fine; losing the thread
+                # is not.
+                print(f"[servers] monitor cycle failed: {exc}")
 
     @classmethod
     def get_player_lists(cls, server):

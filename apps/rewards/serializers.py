@@ -37,9 +37,15 @@ class RankPurchaseSerializer(serializers.Serializer):
 
 
 class UserRankResponseSerializer(serializers.Serializer):
-    """Mod uchun player rank response"""
+    """Mod uchun player rank response.
 
+    uuid is what the mod keys on -- usernames change, uuids do not. priority
+    lets the client order players by rank rather than alphabetically.
+    """
+
+    uuid = serializers.CharField()
     username = serializers.CharField()
     rank = serializers.CharField()
     color_code = serializers.CharField()
+    priority = serializers.IntegerField()
     formatted = serializers.CharField()

@@ -225,13 +225,16 @@ class PlayerRankView(APIView):
 
         rank = Rank.objects.filter(name=user.rank).first()
         color_code = rank.color_code if rank else "§7"
+        priority = rank.priority if rank else 0
 
         formatted = f"{color_code}[{user.rank}]§f {user.username}"
 
         data = {
+            "uuid": user.minecraft_uuid or "",
             "username": user.username,
             "rank": user.rank,
             "color_code": color_code,
+            "priority": priority,
             "formatted": formatted,
         }
         return Response(UserRankResponseSerializer(data).data)
@@ -244,23 +247,39 @@ class BulkPlayerRanksView(APIView):
     authentication_classes = []
 
     def post(self, request):
-        usernames = request.data.get("usernames", [])
+        """Look players up by uuid (preferred) or by username.
 
-        if not usernames or not isinstance(usernames, list):
+        One request per refresh instead of one per online player. The mod
+        keys on uuid, so the response is keyed by whichever identifier was
+        asked for.
+        """
+        uuids = request.data.get("uuids")
+        usernames = request.data.get("usernames")
+
+        if isinstance(uuids, list) and uuids:
+            users = User.objects.filter(minecraft_uuid__in=uuids)
+            key_of = lambda user: user.minecraft_uuid  # noqa: E731
+        elif isinstance(usernames, list) and usernames:
+            users = User.objects.filter(username__in=usernames)
+            key_of = lambda user: user.username  # noqa: E731
+        else:
             return Response(
-                {"error": "usernames list kerak"},
+                {"error": "uuids yoki usernames list kerak"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        users = User.objects.filter(username__in=usernames)
-        ranks = {r.name: r.color_code for r in Rank.objects.all()}
+        ranks = {r.name: r for r in Rank.objects.all()}
 
         result = {}
         for user in users:
-            color_code = ranks.get(user.rank, "§7")
-            result[user.username] = {
+            rank = ranks.get(user.rank)
+            color_code = rank.color_code if rank else "§7"
+            result[key_of(user)] = {
+                "uuid": user.minecraft_uuid or "",
+                "username": user.username,
                 "rank": user.rank,
                 "color_code": color_code,
+                "priority": rank.priority if rank else 0,
                 "formatted": f"{color_code}[{user.rank}]§f {user.username}",
             }
 

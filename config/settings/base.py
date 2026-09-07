@@ -35,6 +35,7 @@ env = environ.Env(
     GOOGLE_CLIENT_ID=(str, ""),
     TELEGRAM_BOT_TOKEN=(str, ""),
     MOD_API_KEY=(str, ""),
+    YGGDRASIL_ALLOW_PASSWORD_LOGIN=(bool, False),
     REDIS_URL=(str, ""),
     DB_NAME=(str, ""),
     DB_USER=(str, ""),
@@ -204,9 +205,20 @@ SITE_URL = env("SITE_URL")
 GOOGLE_CLIENT_ID = env("GOOGLE_CLIENT_ID") or None
 TELEGRAM_BOT_TOKEN = env("TELEGRAM_BOT_TOKEN") or None
 
-# Shared secret presented by cybercraftauth and cybercraftranks in the
-# X-CyberCraft-Key header. Required in production; see apps/accounts/permissions.py.
+# Shared secret presented by the in-game mods in the X-CyberCraft-Key
+# header. Required in production; see apps/accounts/permissions.py.
 MOD_API_KEY = env("MOD_API_KEY")
+
+# Whether /yggdrasil/authserver/authenticate accepts a username and password.
+#
+# Off by default. That endpoint is the standard Yggdrasil password login, so
+# leaving it open lets any third-party launcher point authlib-injector at this
+# backend, sign in with a real CyberCraft account and join -- the account is
+# genuine, so nothing downstream can tell the difference. With it closed the
+# only way to obtain a token is launcher-authenticate, which requires a
+# launcher session, and "CyberCraft Launcher only" is enforced at login
+# instead of by a server-side mod after the player is already in the world.
+YGGDRASIL_ALLOW_PASSWORD_LOGIN = env("YGGDRASIL_ALLOW_PASSWORD_LOGIN")
 
 LOG_DIR = BASE_DIR / "logs"
 
@@ -259,6 +271,21 @@ def sqlite_database():
         "default": {
             "ENGINE": "django.db.backends.sqlite3",
             "NAME": BASE_DIR / "db.sqlite3",
+            # A running Minecraft server writes a row per console line while
+            # the panel polls the log endpoint every couple of seconds. Under
+            # the default rollback journal that serialises into "database is
+            # locked" -- the log view started answering 500, and the status
+            # monitor thread died on it. WAL lets readers work while a write
+            # is in flight, and the busy timeout absorbs the rest.
+            "OPTIONS": {
+                "timeout": 30,
+                "transaction_mode": "IMMEDIATE",
+                "init_command": (
+                    "PRAGMA journal_mode=WAL;"
+                    "PRAGMA synchronous=NORMAL;"
+                    "PRAGMA busy_timeout=30000;"
+                ),
+            },
         }
     }
 

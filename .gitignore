@@ -23,6 +23,9 @@ env_kali/
 local_settings.py
 db.sqlite3
 db.sqlite3-journal
+# WAL sidecars, created since the dev database switched to journal_mode=WAL.
+db.sqlite3-wal
+db.sqlite3-shm
 staticfiles/
 media/
 /servers/
