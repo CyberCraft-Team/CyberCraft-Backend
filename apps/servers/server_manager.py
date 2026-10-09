@@ -1664,6 +1664,8 @@ enable-command-block=true
                     "reason": reason
                 })
                 if str(server.id) in cls._processes:
+                    cls.send_command(server, f"ban {username} {reason}")
+
         elif action == "remove":
             data = [item for item in data if item.get("name", "").lower() != username.lower()]
             
