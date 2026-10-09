@@ -1,3 +1,5 @@
+import logging
+
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny, IsAdminUser
@@ -34,6 +36,8 @@ from .serializers import (
     MinecraftServerGalleryImageSerializer,
 )
 from .server_manager import MinecraftServerManager
+
+logger = logging.getLogger(__name__)
 
 User = get_user_model()
 
@@ -330,6 +334,15 @@ class MinecraftServerModsView(APIView):
         server = self.get_server(request, server_id)
         if not server:
             return Response({"error": "Ruxsat yo'q"}, status=status.HTTP_403_FORBIDDEN)
+        # The jars in the server's mods folder are the truth here: a server
+        # uploaded as a ZIP brings its own, and files can be dropped in or
+        # removed outside the panel. Reconciling on read is what makes the
+        # list show them without anyone re-uploading anything.
+        try:
+            MinecraftServerManager.sync_mods_from_disk(server)
+        except Exception as exc:
+            logger.warning("Mod folder sync failed for %s: %s", server.id, exc)
+
         mods = server.mods.all()
         serializer = ServerModSerializer(mods, many=True)
         return Response(serializer.data)

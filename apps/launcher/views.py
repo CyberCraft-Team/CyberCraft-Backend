@@ -10,6 +10,11 @@ from .authentication import LauncherTokenAuthentication
 from apps.accounts.models import AuthToken
 
 
+# Server types that carry no loader information of their own: the real
+# loader has to be read off the server's files instead.
+PLACEHOLDER_LOADERS = {"", "vanilla", "custom", None}
+
+
 class LauncherServersView(APIView):
     authentication_classes = [LauncherTokenAuthentication]
     permission_classes = [IsAuthenticated]
@@ -199,7 +204,12 @@ class LauncherServerManifestView(APIView):
         detected_loader, detected_loader_version = self._detect_loader_from_server_files(
             server
         )
-        if (not loader or loader == "vanilla") and detected_loader:
+        # "custom" is what the panel stamps on a server uploaded as a ZIP --
+        # it says "the panel did not install this", not "this server runs no
+        # mod loader". Treating it as a real loader sent the launcher a
+        # manifest it could not act on, so it built a vanilla client that
+        # the server then refused. The files on disk are the better witness.
+        if loader in PLACEHOLDER_LOADERS and detected_loader:
             loader = detected_loader
         if (not loader_version or loader_version == server.minecraft_version) and detected_loader_version:
             loader_version = detected_loader_version
@@ -211,7 +221,7 @@ class LauncherServerManifestView(APIView):
             update_fields.append("loader_version")
         if (
             loader
-            and loader != "vanilla"
+            and loader not in PLACEHOLDER_LOADERS
             and (not server.server_type or server.server_type.server_type != loader)
         ):
             server_type_obj = (
@@ -243,9 +253,16 @@ class LauncherServerManifestView(APIView):
 
         mods = server.mods.filter(status="enabled")
         for mod in mods:
+            # Mods that came in inside a server archive have no MEDIA_ROOT
+            # copy but are still downloadable, straight from the server's
+            # own mods folder -- so a null url here would have left the
+            # launcher unable to build a client for an uploaded server.
+            has_bytes = bool(mod.file) or os.path.exists(
+                _server_mod_path(mod) or ""
+            )
             download_url = request.build_absolute_uri(
                 f"/api/v1/launcher/download/mod/{mod.id}/"
-            ) if mod.file else None
+            ) if has_bytes else None
             manifest["files"]["mods"].append(
                 {
                     "name": mod.file_name,
@@ -426,6 +443,14 @@ class LauncherWSTokenView(APIView):
         })
 
 
+def _server_mod_path(mod):
+    """Where a jar that arrived inside a server archive actually sits."""
+    server_path = mod.server.server_path
+    if not server_path:
+        return None
+    return os.path.join(server_path, "mods", mod.file_name)
+
+
 class ModFileDownloadView(APIView):
     """Launcher uchun mod fayllarni yuklab olish (ServerMod)"""
     authentication_classes = [LauncherTokenAuthentication]
@@ -437,11 +462,16 @@ class ModFileDownloadView(APIView):
         except ServerMod.DoesNotExist:
             raise Http404("Mod topilmadi")
 
-        if not mod.file:
-            raise Http404("Mod faylga ega emas")
+        # A mod uploaded through the panel keeps its own copy under
+        # MEDIA_ROOT. One that came in inside a server archive has no such
+        # copy -- it lives in the server's own mods folder, and that is
+        # where it is served from rather than duplicating the modpack.
+        if mod.file:
+            file_path = mod.file.path
+        else:
+            file_path = _server_mod_path(mod)
 
-        file_path = mod.file.path
-        if not os.path.exists(file_path):
+        if not file_path or not os.path.exists(file_path):
             raise Http404("Mod fayli diskda topilmadi")
 
         content_type, _ = mimetypes.guess_type(file_path)

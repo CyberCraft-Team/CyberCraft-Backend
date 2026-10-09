@@ -15,7 +15,7 @@ class IsTrustedMod(BasePermission):
     """Shared-secret gate for the in-game mod endpoints.
 
     /minecraft/verify/ and /rewards/player-rank(s)/ are called by
-    cybercraftauth and cybercraftranks running on the game servers, not by
+    cybercraftranks running on the game servers, not by
     a logged-in user, so there is no token to present. They were previously
     open to anyone who could reach the backend: /minecraft/verify/ answers
     whether a named player may join, and player-rank leaks the roster.

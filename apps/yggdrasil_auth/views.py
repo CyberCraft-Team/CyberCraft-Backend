@@ -1,4 +1,5 @@
 import uuid as uuid_module
+from django.conf import settings
 from django.contrib.auth import authenticate
 from django.http import JsonResponse, HttpResponse
 from rest_framework.views import APIView
@@ -51,11 +52,28 @@ class YggdrasilMetadataView(APIView):
 
 
 class YggdrasilAuthenticateView(APIView):
-    """Authenticate player via username/email and password."""
+    """Authenticate player via username/email and password.
+
+    Closed unless YGGDRASIL_ALLOW_PASSWORD_LOGIN is set. This is the standard
+    Yggdrasil password login, so while it is open any launcher that points
+    authlib-injector here can sign in with a real CyberCraft account and join:
+    the account is genuine, so neither online-mode nor anything downstream can
+    tell it apart from our own launcher. Closing it leaves
+    launcher-authenticate as the only source of tokens, which enforces
+    "CyberCraft Launcher only" during login rather than after the player has
+    already entered the world.
+    """
     permission_classes = [AllowAny]
     authentication_classes = []
 
     def post(self, request):
+        if not getattr(settings, "YGGDRASIL_ALLOW_PASSWORD_LOGIN", False):
+            return yggdrasil_error(
+                "ForbiddenOperationException",
+                "Parol bilan kirish o'chirilgan. CyberCraft Launcher orqali "
+                "kiring: cybercraft.uz/download",
+            )
+
         username_or_email = request.data.get("username")
         password = request.data.get("password")
         client_token = request.data.get("clientToken")
