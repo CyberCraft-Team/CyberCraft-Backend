@@ -1664,8 +1664,6 @@ enable-command-block=true
                     "reason": reason
                 })
                 if str(server.id) in cls._processes:
-                    cls.send_command(server, f"ban {username} {reason}")
-                    
         elif action == "remove":
             data = [item for item in data if item.get("name", "").lower() != username.lower()]
             
@@ -1700,3 +1698,11 @@ enable-command-block=true
         hash_bytes[6] = (hash_bytes[6] & 0x0f) | 0x30
         hash_bytes[8] = (hash_bytes[8] & 0x3f) | 0x80
         return str(uuid_lib.UUID(bytes=bytes(hash_bytes)))
+
+
+
+
+
+
+
+
