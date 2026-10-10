@@ -8,6 +8,7 @@ from .views import HealthCheckView
 
 api_v1_patterns = [
     path("", include("apps.accounts.urls")),
+    path("", include("apps.auditlog.urls")),
     path("", include("apps.launcher.urls")),
     path("", include("apps.servers.urls")),
     path("", include("apps.news.urls")),
