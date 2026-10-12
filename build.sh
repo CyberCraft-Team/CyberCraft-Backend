@@ -1,16 +1,22 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # CyberCraft — Build/Deploy Script
 # Production da ishga tushirilganda collectstatic, migrate, va superuser yaratadi.
-set -o errexit
+set -euo pipefail
+root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+cd "$root"
+export PRODUCTION=${PRODUCTION:-1}
+python_bin=${PYTHON:-python}
 
-pip install -r requirements.txt
+"$python_bin" -m pip install -r requirements.txt
+"$python_bin" manage.py check
+"$python_bin" manage.py check --deploy --tag security --fail-level WARNING
 
-python manage.py collectstatic --no-input
+"$python_bin" manage.py collectstatic --no-input
 
-python manage.py migrate
+"$python_bin" manage.py migrate
 
 # Superuser yaratish — env dan olinadi (hardcoded emas!)
-python manage.py shell -c "
+"$python_bin" manage.py shell -c "
 from django.contrib.auth import get_user_model
 import os
 

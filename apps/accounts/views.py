@@ -9,6 +9,7 @@ from django.contrib.auth import authenticate
 from django.core.files.base import ContentFile
 from django.conf import settings
 from django.utils import timezone
+from django.db import transaction
 from PIL import Image
 import io
 import os
@@ -893,6 +894,7 @@ class ConfirmPasswordResetView(APIView):
     permission_classes = [AllowAny]
     authentication_classes = []
 
+    @transaction.atomic
     def post(self, request):
         token_str = request.data.get("token")
         new_password = request.data.get("new_password")
@@ -912,7 +914,7 @@ class ConfirmPasswordResetView(APIView):
         from .models import PasswordResetToken
 
         try:
-            token = PasswordResetToken.objects.select_related("user").get(
+            token = PasswordResetToken.objects.select_for_update().select_related("user").get(
                 token=token_str, is_used=False
             )
         except PasswordResetToken.DoesNotExist:
@@ -932,8 +934,11 @@ class ConfirmPasswordResetView(APIView):
         user.set_password(new_password)
         user.save(update_fields=["password"])
 
-        token.is_used = True
-        token.save(update_fields=["is_used"])
+        # A recovered account must invalidate stolen launcher/admin/game credentials.
+        AuthToken.objects.filter(user=user).delete()
+        user.yggdrasil_tokens.all().delete()
+        user.yggdrasil_sessions.all().delete()
+        PasswordResetToken.objects.filter(user=user, is_used=False).update(is_used=True)
 
         return Response({"message": "Parol muvaffaqiyatli o'zgartirildi!"})
 

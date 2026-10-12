@@ -26,6 +26,9 @@ WorkingDirectory=/srv/cybercraft/backend
 Environment=PRODUCTION=1
 Environment=DJANGO_SETTINGS_MODULE=config.settings
 EnvironmentFile=/srv/cybercraft/backend/.env
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
 
 ExecStart=/srv/cybercraft/backend/env/bin/daphne \
     -b 127.0.0.1 \

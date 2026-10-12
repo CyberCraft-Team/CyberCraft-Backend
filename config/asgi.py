@@ -40,7 +40,7 @@ class TokenAuthMiddleware(BaseMiddleware):
             token = AuthToken.objects.select_related("user").get(
                 key=token_key, scope=AuthToken.Scope.LAUNCHER
             )
-            if not token.is_expired():
+            if not token.is_expired() and token.user.can_authenticate():
                 return token.user
         except AuthToken.DoesNotExist:
             pass
@@ -50,7 +50,11 @@ class TokenAuthMiddleware(BaseMiddleware):
             token = AuthToken.objects.select_related("user").get(
                 key=token_key, scope=AuthToken.Scope.ADMIN
             )
-            if not token.is_expired():
+            if (
+                not token.is_expired()
+                and token.user.can_authenticate()
+                and (token.user.is_staff or token.user.is_superuser)
+            ):
                 return token.user
         except AuthToken.DoesNotExist:
             pass

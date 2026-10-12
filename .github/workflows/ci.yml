@@ -35,7 +35,9 @@ jobs:
     env:
       PRODUCTION: "1"
       USE_SSL: "1"
-      SECRET_KEY: ci-only-not-a-real-secret
+      DJANGO_SETTINGS_MODULE: config.settings
+      SECRET_KEY: ci-only-secret-key-with-sufficient-length-abcdefghijklmnopqrstuvwxyz
+      MOD_API_KEY: ci-only-mod-api-key
       ALLOWED_HOSTS: localhost,127.0.0.1
       DATABASE_URL: postgres://cybercraft:cybercraft@localhost:5432/cybercraft_test
       REDIS_URL: redis://localhost:6379/0
@@ -55,6 +57,9 @@ jobs:
           pip install -r requirements.txt
           pip install -r requirements-dev.txt
 
+      - name: Audit runtime dependencies
+        run: pip-audit --requirement requirements.txt --strict
+
       - name: Django system checks
         run: python manage.py check
 
@@ -62,11 +67,14 @@ jobs:
       # could not pass: the star-import cycle meant DEBUG, the database and
       # the SECURE_* block did not hold the values they appeared to.
       - name: Deployment checks
-        run: python manage.py check --deploy
+        run: python manage.py check --deploy --tag security --fail-level WARNING
 
       - name: Assert production settings really apply
         run: |
           python - <<'PY'
+          import sys
+          # This assertion is an offline check; never start the game supervisor.
+          sys.argv = ["manage.py", "check"]
           import django
           django.setup()
           from django.conf import settings as s
@@ -82,6 +90,8 @@ jobs:
         run: python manage.py makemigrations --check --dry-run
 
       - name: Tests
+        env:
+          USE_SSL: "0"
         run: python manage.py test
 
       # Non-blocking: 98 findings on code that has never been linted.

@@ -76,7 +76,7 @@ if not MOD_API_KEY:  # noqa: F405
 # LAN address before a certificate exists.
 # ---------------------------------------------------------------------------
 
-_USE_SSL = env.bool("USE_SSL", False)
+_USE_SSL = env.bool("USE_SSL", True)
 
 SECURE_SSL_REDIRECT = _USE_SSL
 SESSION_COOKIE_SECURE = _USE_SSL
@@ -185,6 +185,11 @@ if env("EMAIL_HOST") and env("EMAIL_HOST_USER"):
 # ---------------------------------------------------------------------------
 # Media
 #
+# Public media must remain readable by nginx under the service's private 0027
+# umask. These modes apply only to Django FileSystemStorage uploads.
+FILE_UPLOAD_DIRECTORY_PERMISSIONS = 0o755
+FILE_UPLOAD_PERMISSIONS = 0o644
+
 # nginx serves /media/ and /static/ directly; see deploy/nginx.conf. Django
 # never sees those requests in production.
 # ---------------------------------------------------------------------------

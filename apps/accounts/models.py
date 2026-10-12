@@ -65,6 +65,13 @@ class User(AbstractUser):
             if not User.objects.filter(referral_code=code).exists():
                 return code
 
+    def can_authenticate(self):
+        """Apply account state to credentials after DRF authentication begins."""
+        banned = self.is_banned and (
+            self.banned_until is None or self.banned_until > timezone.now()
+        )
+        return self.is_active and not banned
+
     def __str__(self):
         return self.username
 

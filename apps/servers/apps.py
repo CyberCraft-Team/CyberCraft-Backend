@@ -21,6 +21,7 @@ class ServersConfig(AppConfig):
         # there, and none of them serve traffic, so there is nothing to
         # reconcile or monitor for them.
         offline_commands = {
+            "check",
             "migrate",
             "makemigrations",
             "collectstatic",

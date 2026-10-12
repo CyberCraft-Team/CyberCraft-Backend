@@ -19,7 +19,7 @@ class WSTokenAuthMixin:
             token = AuthToken.objects.select_related("user").get(
                 key=token_key, scope=AuthToken.Scope.WEBSOCKET
             )
-            if not token.is_expired():
+            if not token.is_expired() and token.user.can_authenticate():
                 return token.user
         except AuthToken.DoesNotExist:
             pass

@@ -40,8 +40,8 @@ class ScopedTokenAuthentication(BaseAuthentication):
             token.delete()
             raise AuthenticationFailed("Token muddati tugagan. Qaytadan kiring.")
 
-        if not token.user.is_active:
-            raise AuthenticationFailed("Foydalanuvchi faol emas.")
+        if not token.user.can_authenticate():
+            raise AuthenticationFailed("Foydalanuvchi faol emas yoki bloklangan.")
 
         self.check_user(token.user)
         token.touch()

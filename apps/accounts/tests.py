@@ -3,9 +3,12 @@ Unit tests for core backend functionality.
 Run: python manage.py test apps.accounts.tests
 """
 
-from django.test import TestCase, override_settings
+from django.test import TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
 from datetime import timedelta
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
 from rest_framework.exceptions import AuthenticationFailed
 from rest_framework.test import APIClient
 
@@ -169,6 +172,11 @@ class AuthAPITest(TestCase):
 
     def setUp(self):
         self.client = APIClient()
+        media = TemporaryDirectory()
+        self.addCleanup(media.cleanup)
+        media_settings = override_settings(MEDIA_ROOT=Path(media.name))
+        media_settings.enable()
+        self.addCleanup(media_settings.disable)
 
     def test_register(self):
         import io
@@ -340,7 +348,8 @@ class HealthCheckTest(TestCase):
 
     def test_health_check(self):
         client = APIClient()
-        response = client.get("/api/v1/health/")
+        with TemporaryDirectory() as media, override_settings(MEDIA_ROOT=Path(media)):
+            response = client.get("/api/v1/health/")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["status"], "ok")
         self.assertIn("database", response.data["checks"])
@@ -390,3 +399,124 @@ class DailyBonusTest(TestCase):
 
         streak, _ = bonus.claim()
         self.assertEqual(streak, 1)
+
+
+class CredentialSecurityTest(TransactionTestCase):
+    # Channels closes old connections around async DB calls. TransactionTestCase
+    # avoids enclosing PostgreSQL connections in TestCase's atomic transaction.
+    def setUp(self):
+        from django.core.cache import cache
+        cache.clear()
+        self.user = User.objects.create_user(username="security-user", password="old-password")
+        self.client = APIClient()
+
+    def test_banned_launcher_token_is_rejected_after_issue(self):
+        token = AuthToken.issue(self.user, AuthToken.Scope.LAUNCHER)
+        self.user.is_banned = True
+        self.user.save(update_fields=["is_banned"])
+        self.client.credentials(HTTP_AUTHORIZATION=f"Launcher {token.key}")
+        self.assertEqual(self.client.get("/api/v1/auth/launcher/me/").status_code, 401)
+
+    def test_expired_ban_allows_authentication(self):
+        self.user.is_banned = True
+        self.user.banned_until = timezone.now() - timedelta(minutes=1)
+        self.user.save()
+        token = AuthToken.issue(self.user, AuthToken.Scope.LAUNCHER)
+        self.client.credentials(HTTP_AUTHORIZATION=f"Launcher {token.key}")
+        self.assertEqual(self.client.get("/api/v1/auth/launcher/me/").status_code, 200)
+
+    def test_websocket_credentials_reject_inactive_and_banned_users(self):
+        from asgiref.sync import async_to_sync
+        from config.asgi import TokenAuthMiddleware
+        from apps.launcher.consumers import WSTokenAuthMixin
+        launcher = AuthToken.issue(self.user, AuthToken.Scope.LAUNCHER)
+        websocket = AuthToken.issue(self.user, AuthToken.Scope.WEBSOCKET)
+        middleware = TokenAuthMiddleware(None)
+        for fields in ({"is_active": False}, {"is_active": True, "is_banned": True}):
+            User.objects.filter(pk=self.user.pk).update(**fields)
+            with self.subTest(fields=fields):
+                self.assertTrue(async_to_sync(middleware.get_user_from_token)(launcher.key).is_anonymous)
+                self.assertTrue(async_to_sync(WSTokenAuthMixin().get_user_from_ws_token)(websocket.key).is_anonymous)
+
+    def test_password_reset_revokes_all_credentials_and_reset_links(self):
+        from apps.yggdrasil_auth.models import YggdrasilSession, YggdrasilToken
+        for scope in AuthToken.Scope:
+            AuthToken.issue(self.user, scope)
+        game_token = YggdrasilToken.objects.create(user=self.user)
+        YggdrasilSession.objects.create(user=self.user, access_token=game_token.access_token, server_id="server")
+        reset = PasswordResetToken.objects.create(user=self.user)
+        other_reset = PasswordResetToken.objects.create(user=self.user)
+        response = self.client.post("/api/v1/auth/password-reset/confirm/", {"token": reset.token, "new_password": "new-safe-password"}, format="json")
+        self.assertEqual(response.status_code, 200)
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.check_password("new-safe-password"))
+        self.assertFalse(self.user.auth_tokens.exists())
+        self.assertFalse(self.user.yggdrasil_tokens.exists())
+        self.assertFalse(self.user.yggdrasil_sessions.exists())
+        other_reset.refresh_from_db()
+        self.assertTrue(other_reset.is_used)
+
+
+class ReadinessSecurityTest(TestCase):
+    def test_missing_media_directory_is_unready_without_disclosing_path(self):
+        with TemporaryDirectory() as directory, override_settings(MEDIA_ROOT=Path(directory) / "missing"):
+            response = APIClient().get("/api/v1/health/")
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.data["status"], "error")
+        self.assertNotIn("path", response.data["checks"]["media_storage"])
+
+    def test_database_failure_is_unready_without_disclosing_error(self):
+        with TemporaryDirectory() as directory, override_settings(MEDIA_ROOT=Path(directory)):
+            with patch("config.views.connection.cursor", side_effect=RuntimeError("private connection details")):
+                response = APIClient().get("/api/v1/health/")
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.data["checks"]["database"], {"status": "error"})
+
+
+    def test_redis_failure_is_unready(self):
+        caches = {"default": {"BACKEND": "django.core.cache.backends.redis.RedisCache", "LOCATION": "redis://127.0.0.1:6379/15"}}
+        with TemporaryDirectory() as directory, override_settings(MEDIA_ROOT=Path(directory), CACHES=caches):
+            with patch("config.views.cache.get", side_effect=ConnectionError("private Redis details")):
+                response = APIClient().get("/api/v1/health/")
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.data["checks"]["cache"], {"status": "error"})
+
+
+class ProductionMediaPermissionsTest(TestCase):
+    def test_public_uploads_remain_readable_under_private_service_umask(self):
+        import os
+        import subprocess
+        import sys
+        script = """
+import os, stat, sys, tempfile
+from pathlib import Path
+sys.argv = ["manage.py", "check"]
+from django.conf import settings
+settings.LOGGING = {"version": 1, "disable_existing_loggers": False}
+import django
+django.setup()
+from django.core.files.base import ContentFile
+from django.core.files.storage import FileSystemStorage
+with tempfile.TemporaryDirectory() as directory:
+    previous = os.umask(0o027)
+    try:
+        storage = FileSystemStorage(location=directory)
+        name = storage.save("skins/player.png", ContentFile(b"public-media"))
+    finally:
+        os.umask(previous)
+    assert stat.S_IMODE((Path(directory) / "skins").stat().st_mode) == 0o755
+    assert stat.S_IMODE((Path(directory) / name).stat().st_mode) == 0o644
+"""
+        environment = {
+            **os.environ,
+            "PRODUCTION": "1",
+            "SECRET_KEY": "media-test-secret-key-abcdefghijklmnopqrstuvwxyz-0123456789",
+            "MOD_API_KEY": "media-test-mod-key",
+            "ALLOWED_HOSTS": "localhost,127.0.0.1",
+            "DATABASE_URL": "sqlite://:memory:",
+            "USE_SQLITE": "0",
+            "REDIS_URL": "redis://127.0.0.1:6379/15",
+            "DJANGO_SETTINGS_MODULE": "config.settings",
+        }
+        result = subprocess.run([sys.executable, "-c", script], env=environment, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
